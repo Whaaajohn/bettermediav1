@@ -1,0 +1,46 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "tunnel": "node src/tunnel.js",
+    "db:backup": "node src/scripts/db-backup.js",
+    "db:restore": "node src/scripts/db-restore.js",
+    "db:validate": "node src/scripts/db-validate.js",
+    "db:reset-local": "node src/scripts/db-reset-local.js",
+    "db:migrate-local-to-mongo": "node src/scripts/db-migrate-local-to-mongo.js",
+    "db:migrate-local-to-mongo:dry": "node src/scripts/db-migrate-local-to-mongo.js --dry",
+    "db:export-media-to-mongo": "node src/scripts/db-export-media-to-mongo.js",
+    "db:export-all-to-mongo": "npm run db:migrate-local-to-mongo && npm run db:export-media-to-mongo && npm run mongo:indexes",
+    "mongo:indexes": "node src/scripts/mongo-indexes.js",
+    "db:clean-test-users": "node src/scripts/db-clean-test-users.js",
+    "bot:download-model": "node src/scripts/bot-download-model.js",
+    "test:health": "node src/scripts/test-health.js",
+    "ready": "node src/scripts/ready.js"
+  },
+  "keywords": [],
+  "author": "",
+  "type": "module",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "@xenova/transformers": "^2.17.2",
+    "axios": "^1.16.1",
+    "bcryptjs": "^3.0.2",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.0",
+    "follow": "^1.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.15.0",
+    "redis": "^4.7.0",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

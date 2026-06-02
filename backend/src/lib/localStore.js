@@ -1,0 +1,7714 @@
+import bcrypt from "bcryptjs";
+import crypto from "crypto";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
+
+import { env } from "../config/env.js";
+import { NORMALIZED_LANGUAGES, languageLabel as formatLanguageLabel } from "../constants/languages.js";
+import { classifyPostText, normalizeHashtag } from "../services/classifier.service.js";
+import { paginate, scorePostForUser } from "../services/feed.service.js";
+import { loadDataFromMongo, persistDataToMongo } from "../services/mongoStore.service.js";
+import { sanitizeSongAttachment } from "../services/music.service.js";
+import { saveUploadDataUrl } from "../services/storage.service.js";
+import { modelRoutingSummary } from "../bots/services/ollamaRouter.js";
+import { getOllamaHealthCache, listOllamaModels } from "../bots/services/ollamaClient.js";
+import { moderateImageContent } from "../bots/services/botVisionModerationService.js";
+import { detectModerationConcern, generateBotReply, generateFollowThanks, getLocalAIStatus } from "./localAi.js";
+
+const defaultDbPath = fileURLToPath(new URL("../../data/db.json", import.meta.url));
+const dbPath = process.env.LOCAL_DB_FILE
+  ? path.resolve(process.cwd(), process.env.LOCAL_DB_FILE)
+  : defaultDbPath;
+const dbDir = path.dirname(dbPath);
+const mediaDir = path.join(dbDir, "media");
+const backupDir = path.resolve(process.cwd(), env.DB_BACKUP_DIR);
+
+const initialData = {
+  users: [],
+  friendRequests: [],
+  followRequests: [],
+  messages: [],
+  sessions: [],
+  loginChallenges: [],
+  posts: [],
+  callHistory: [],
+  reports: [],
+  appeals: [],
+  notifications: [],
+  moderationActions: [],
+  moderationLogs: [],
+  outreachEvents: [],
+  hashtags: [],
+  languageGroups: [],
+  algorithmEvents: [],
+  blockedHashtags: [],
+  botActions: [],
+  botAuditLogs: [],
+  botReports: [],
+  botAppeals: [],
+  botPunishments: [],
+  botModelCache: [],
+  botContentScans: [],
+  botImageScans: [],
+  botAppealReviews: [],
+  botMemories: [],
+  botMemorySummaries: [],
+  botModerationDecisions: [],
+  botSocialComments: [],
+  botRuleVersions: [],
+  quarantinedContent: [],
+  userRestrictions: [],
+  moderationAuditLogs: [],
+  botModelHealth: [],
+  botStats: {
+    startedAt: null,
+    eventsProcessed: 0,
+    actionsCreated: 0,
+    lastEventAt: null,
+    lastError: null,
+  },
+  botTraining: {
+    rules:
+      "Keep BetterMedia safe for language learners and social users. Stay focused on BetterMedia features only. No harassment, threats, hate, doxxing, scams, impersonation, spam, ban evasion, or sexual content involving minors. Encourage reports, blocks, appeals, and settings instead of arguments.",
+    moderationTone:
+      "Be short, social, calm, and professional. Do not invent admin actions. Tell users when something needs admin review.",
+    languagePractice:
+      "Help users rewrite sentences clearly, naturally, and respectfully in the language they are practicing. Ask for the target language if it is missing.",
+    escalation:
+      "For bans, threats, unsafe behavior, privacy issues, call abuse, impersonation, or appeals, guide users to report or appeal in the app.",
+    blockedTopics: "evading bans, harassment, doxxing, scams, explicit sexual content, stealing accounts, bypassing verification",
+  },
+  botSettings: {
+    enabled: true,
+    scanPosts: true,
+    scanComments: true,
+    scanMessages: true,
+    scanImages: true,
+    scanReports: true,
+    scanAppeals: true,
+    localAIEnabled: true,
+    allowAutoActions: true,
+    autoHideHighConfidence: false,
+    autoMuteCritical: true,
+    createReports: true,
+    warnUsers: true,
+    maxMuteMinutes: 60,
+    actionCooldownMs: 30000,
+    maxActionsPerUserPerHour: 12,
+    lowConfidenceAction: "log",
+    mediumConfidenceAction: "warn",
+    highConfidenceAction: "temp_mute",
+    criticalConfidenceAction: "temp_ban",
+    randomCommentEnabled: false,
+    thankFollowEnabled: true,
+    autoFollowBack: true,
+    allowModelReply: true,
+    autoTempBanCritical: true,
+    botCanAcceptLowRiskAppeals: true,
+  },
+  adminSettings: {
+    defaultBanDays: 7,
+    defaultModerationReason: "Community safety",
+    defaultStaffTitle: "Message from moderation",
+    staffSignature: "MEDIA moderation team",
+    reportCategories: [
+      "Harassment",
+      "Hate or slurs",
+      "Threats",
+      "Spam or scam",
+      "Privacy",
+      "Impersonation",
+      "Sexual content",
+      "Bug",
+      "Other",
+    ],
+    autoRefreshSeconds: 5,
+    requireEmailForStaffOutreach: false,
+  },
+};
+
+let queue = Promise.resolve();
+
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const safeArray = (value) => {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+  if (Array.isArray(value.items)) return value.items;
+  if (Array.isArray(value.data)) return value.data;
+  if (typeof value === "object") {
+    const numericKeys = Object.keys(value).filter((key) => /^\d+$/.test(key));
+    if (numericKeys.length) {
+      return numericKeys
+        .sort((a, b) => Number(a) - Number(b))
+        .map((key) => value[key])
+        .filter(Boolean);
+    }
+  }
+  return [];
+};
+
+const now = () => new Date().toISOString();
+
+const normalizeId = (id) => id?.toString();
+
+const staffRoles = new Set(["creator", "admin", "mod"]);
+
+const isFuture = (value) => value && new Date(value).getTime() > Date.now();
+
+const adminRoles = new Set(["creator", "admin"]);
+const makeCode = () => crypto.randomInt(100000, 1000000).toString();
+
+const INTEREST_OPTIONS = [
+  "gaming",
+  "music",
+  "sports",
+  "coding",
+  "ai",
+  "news",
+  "memes",
+  "movies",
+  "fitness",
+  "school",
+  "language_learning",
+  "local_community",
+  "tech",
+  "fashion",
+  "food",
+  "travel",
+  "business",
+  "motivation",
+];
+
+function defaultAlgorithmProfile(user = {}) {
+  const learningLanguages = safeArray(user.learningLanguages).length ? safeArray(user.learningLanguages) : [user.learningLanguage].filter(Boolean);
+  const preferredLanguages = [
+    user.nativeLanguage,
+    user.learningLanguage,
+    ...learningLanguages,
+  ].filter(Boolean);
+
+  return {
+    selectedInterests: [],
+    interestWeights: {},
+    negativeInterestWeights: {},
+    preferredLanguages: [...new Set(preferredLanguages.map((value) => value.toLowerCase()))],
+    nativeLanguage: user.nativeLanguage || "",
+    learningLanguages,
+    contentPreferences: {
+      memes: true,
+      gaming: true,
+      coding: true,
+      music: true,
+      sports: true,
+      languageLearning: true,
+      news: false,
+      politics: false,
+    },
+    feedMode: "balanced",
+    hiddenPosts: [],
+    mutedHashtags: [],
+    lastUpdatedAt: now(),
+  };
+}
+
+const hashCode = (code = "") =>
+  crypto.createHash("sha256").update(code.trim()).digest("hex");
+
+const slugify = (value = "user") =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 24) || "user";
+
+function makeUniqueUsername(seed, users, currentUserId) {
+  const base = slugify(seed);
+  let username = base;
+  let suffix = 1;
+
+  while (
+    users.some(
+      (user) =>
+        user._id !== currentUserId &&
+        user.username?.toLowerCase() === username.toLowerCase()
+    )
+  ) {
+    username = `${base}${suffix}`;
+    suffix += 1;
+  }
+
+  return username;
+}
+
+function getActiveModeration(user) {
+  const fullBan = user?.fullBannedAt
+    ? {
+        type: "full",
+        until: null,
+        reason: user.fullBanReason || "Full account ban",
+        issuedAt: user.fullBannedAt,
+        days: null,
+        requiresAdminUnban: true,
+      }
+    : null;
+  const timedBan = isFuture(user?.bannedUntil)
+    ? {
+        type: "timed",
+        until: user.bannedUntil,
+        reason: user.banReason || "Account restriction",
+        issuedAt: user.banIssuedAt || null,
+        days: user.banDays || null,
+        requiresAdminUnban: false,
+      }
+    : null;
+
+  return {
+    ban: fullBan || timedBan,
+    messageBan: isFuture(user?.messageBanUntil)
+      ? { until: user.messageBanUntil, reason: user.messageBanReason || "Messaging restriction" }
+      : null,
+    shadowBan: isFuture(user?.shadowBannedUntil)
+      ? { until: user.shadowBannedUntil, reason: user.shadowBanReason || "Feed restriction" }
+      : null,
+  };
+}
+
+function isAccountBanned(user) {
+  return Boolean(getActiveModeration(user).ban);
+}
+
+function getBotRestriction(user, capability) {
+  const until = user?.botRestriction?.[`${capability}Until`];
+  if (!isFuture(until)) return null;
+  return {
+    capability,
+    until,
+    reason: user.botRestriction?.reason || "Temporary safety restriction",
+    issuedAt: user.botRestriction?.issuedAt || null,
+  };
+}
+
+function requireNoBotRestriction(user, capability, label) {
+  const restriction = getBotRestriction(user, capability);
+  if (!restriction) return;
+
+  const error = new Error(`You cannot ${label} until ${restriction.until}: ${restriction.reason}`);
+  error.status = 403;
+  error.code = "BOT_RESTRICTED";
+  throw error;
+}
+
+const mediaBaseUrl = () => "/media";
+
+const isDataUrl = (value = "") => value.startsWith("data:");
+
+const extensionFromMime = (mimeType = "") => {
+  const map = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/ogg": "ogv",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "text/plain": "txt",
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  };
+
+  return map[mimeType] || "bin";
+};
+
+const escapeSvg = (value) =>
+  value.replace(/[&<>"']/g, (char) => {
+    const escapes = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&apos;",
+    };
+    return escapes[char];
+  });
+
+const hashSeed = (seed) =>
+  [...seed].reduce((total, char) => total + char.charCodeAt(0), 0);
+
+export function makeLocalAvatar(seed = "User") {
+  const label =
+    seed
+      .trim()
+      .split(/\s+/)
+      .map((part) => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "U";
+
+  const colors = ["#2563eb", "#0f766e", "#be123c", "#7c3aed", "#c2410c"];
+  const color = colors[hashSeed(seed) % colors.length];
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160"><rect width="160" height="160" rx="80" fill="${color}"/><text x="50%" y="54%" text-anchor="middle" dominant-baseline="middle" font-family="Arial, sans-serif" font-size="64" font-weight="700" fill="#ffffff">${escapeSvg(label)}</text></svg>`;
+
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+export function publicUser(user) {
+  if (!user) return null;
+
+  const {
+    password,
+    emailVerificationCodeHash: _emailVerificationCodeHash,
+    passwordResetCodeHash,
+    pendingEmailVerificationCodeHash,
+    emailVerificationExpiresAt,
+    emailVerificationSentAt,
+    verifiedBadgeBlocked,
+    passwordResetExpiresAt,
+    passwordResetSentAt,
+    pendingEmailVerificationExpiresAt,
+    pendingEmailVerificationSentAt,
+    ...safeUser
+  } = user;
+  const moderation = getActiveModeration(safeUser);
+  const activeBotRestriction = ["post", "comment", "message"]
+    .map((capability) => getBotRestriction(safeUser, capability))
+    .filter(Boolean);
+  const followerCount = safeUser.followers?.length || 0;
+  const moderationRecordCount = safeArray(safeUser.moderationRecords).filter((record) =>
+    ["ban", "fullBan", "messageBan", "shadowBan", "warn"].includes(record.type)
+  ).length;
+  const badges = [
+    safeUser.role === "creator" && "creator",
+    safeUser.role === "admin" && "adminVerified",
+    safeUser.role === "mod" && "mod",
+    ...safeArray(safeUser.customBadges),
+    !verifiedBadgeBlocked &&
+      (safeUser.verifiedBadgeOverride || (followerCount >= 1000 && moderationRecordCount === 0)) &&
+      "verified",
+  ].filter(Boolean);
+
+  return {
+    ...safeUser,
+    id: safeUser._id,
+    security: {
+      emailCodeOnLogin: Boolean(safeUser.security?.emailCodeOnLogin),
+      loginAlertsEnabled: safeUser.security?.loginAlertsEnabled !== false,
+    },
+    followerCount,
+    followingCount: safeUser.following?.length || 0,
+    badges,
+    activeBan: moderation.ban,
+    activeMessageBan: moderation.messageBan,
+    activeShadowBan: moderation.shadowBan,
+    activeBotRestriction,
+    isStaff: staffRoles.has(safeUser.role),
+    isAdmin: adminRoles.has(safeUser.role),
+    isModerator: safeUser.role === "mod",
+  };
+}
+
+function sanitizeUserForViewer(profile, sourceUser, viewer, data) {
+  if (!profile || !sourceUser) return null;
+  const viewerId = normalizeId(viewer?._id);
+  const isSelf = viewerId && viewerId === sourceUser._id;
+  const isStaff = Boolean(viewer && staffRoles.has(viewer.role));
+  const follows = Boolean(sourceUser.followers?.includes(viewerId));
+  const canSeePrivate = !sourceUser.isPrivate || isSelf || isStaff || follows;
+  const canSeePresence = isSelf || isStaff || sourceUser.showOnlineStatus !== false;
+  const safe = { ...profile };
+
+  if (!isSelf && !isStaff) {
+    delete safe.email;
+    delete safe.pendingEmail;
+    delete safe.security;
+    delete safe.emailVerifiedAt;
+    delete safe.passwordResetExpiresAt;
+    delete safe.passwordResetSentAt;
+    delete safe.emailVerificationExpiresAt;
+    delete safe.emailVerificationSentAt;
+    delete safe.pendingEmailVerificationExpiresAt;
+    delete safe.pendingEmailVerificationSentAt;
+  }
+
+  if (!canSeePresence) {
+    safe.isOnline = false;
+    safe.inCall = false;
+    safe.lastSeen = null;
+  }
+
+  if (!canSeePrivate) {
+    safe.bio = "";
+    safe.location = "";
+    safe.nativeLanguage = "";
+    safe.learningLanguage = "";
+    safe.learningLanguages = [];
+    safe.interests = [];
+    safe.algorithmProfile = undefined;
+    safe.privateLimited = true;
+  }
+
+  return safe;
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function safeSongAttachment(song) {
+  try {
+    return sanitizeSongAttachment(song);
+  } catch {
+    return null;
+  }
+}
+
+function countCommentTree(comments = []) {
+  return comments.reduce(
+    (total, comment) =>
+      comment.deletedAt
+        ? total
+        : total + 1 + countCommentTree(comment.replies || []),
+    0
+  );
+}
+
+function normalizeCommentTree(comments = [], post, parentId = null, rootId = null, depth = 0) {
+  return comments.filter((comment) => !comment.deletedAt).map((comment) => {
+    const id = comment._id || crypto.randomUUID();
+    const normalizedRootId = rootId || comment.rootId || id;
+    const normalized = {
+      ...comment,
+      _id: id,
+      parentId: parentId || comment.parentId || null,
+      rootId: normalizedRootId,
+      depth,
+      language: comment.language || post.language || "english",
+      hashtags: safeArray(comment.hashtags),
+      detectedTags: safeArray(comment.detectedTags),
+      clientId: comment.clientId || null,
+      status: comment.status || "sent",
+      likes: safeArray(comment.likes),
+      reportCount: comment.reportCount || 0,
+      likeCount: comment.likeCount ?? comment.likes?.length ?? 0,
+      gif: comment.gif || null,
+      pinnedAt: comment.pinnedAt || null,
+      pinnedBy: comment.pinnedBy || null,
+      editedAt: comment.editedAt || null,
+      editHistory: safeArray(comment.editHistory),
+      deletedAt: comment.deletedAt || null,
+      replies: [],
+    };
+
+    normalized.replies = normalizeCommentTree(
+      safeArray(comment.replies),
+      post,
+      normalized._id,
+      normalizedRootId,
+      depth + 1
+    );
+    normalized.replyCount = countCommentTree(normalized.replies);
+    return normalized;
+  });
+}
+
+async function ensureStore() {
+  if (env.DB_DRIVER === "mongo") return;
+  await fs.mkdir(dbDir, { recursive: true });
+  await fs.mkdir(mediaDir, { recursive: true });
+
+  try {
+    await fs.access(dbPath);
+  } catch {
+    await fs.writeFile(dbPath, JSON.stringify(initialData, null, 2));
+  }
+}
+
+async function readData() {
+  if (env.DB_DRIVER === "mongo") {
+    const mongoData = await loadDataFromMongo(initialData);
+    if (mongoData) return normalizeData(mongoData);
+  }
+
+  await ensureStore();
+  let data;
+
+  try {
+    const raw = await fs.readFile(dbPath, "utf8");
+    data = JSON.parse(raw || "{}");
+  } catch (error) {
+    const backupPath = path.join(dbDir, `db.corrupt-${Date.now()}.json`);
+
+    try {
+      await fs.rename(dbPath, backupPath);
+      console.error(`[LOCAL DATA] Corrupt db.json was moved to ${backupPath}`);
+    } catch {
+      console.error("[LOCAL DATA] Corrupt db.json could not be backed up.");
+    }
+
+    data = await readLatestBackupData();
+    if (!data) {
+      console.error("[LOCAL DATA] No valid backup was available. Starting from protected empty local store.");
+      data = clone(initialData);
+    } else {
+      console.error("[LOCAL DATA] Recovered local database from latest valid backup.");
+    }
+    await writeData(data);
+  }
+
+  return normalizeData(data);
+}
+
+function normalizeData(data = {}) {
+  const normalized = {
+    ...initialData,
+    ...data,
+    users: safeArray(data.users),
+    friendRequests: safeArray(data.friendRequests),
+    followRequests: safeArray(data.followRequests),
+    messages: safeArray(data.messages),
+    sessions: safeArray(data.sessions),
+    loginChallenges: safeArray(data.loginChallenges),
+    posts: safeArray(data.posts),
+    callHistory: safeArray(data.callHistory),
+    reports: safeArray(data.reports),
+    appeals: safeArray(data.appeals),
+    notifications: safeArray(data.notifications),
+    moderationActions: safeArray(data.moderationActions),
+    moderationLogs: safeArray(data.moderationLogs),
+    outreachEvents: safeArray(data.outreachEvents),
+    hashtags: safeArray(data.hashtags),
+    languageGroups: safeArray(data.languageGroups),
+    algorithmEvents: safeArray(data.algorithmEvents),
+    blockedHashtags: safeArray(data.blockedHashtags),
+    botActions: safeArray(data.botActions),
+    botAuditLogs: safeArray(data.botAuditLogs),
+    botReports: safeArray(data.botReports),
+    botAppeals: safeArray(data.botAppeals),
+    botPunishments: safeArray(data.botPunishments),
+    botModelCache: safeArray(data.botModelCache),
+    botContentScans: safeArray(data.botContentScans),
+    botImageScans: safeArray(data.botImageScans),
+    botAppealReviews: safeArray(data.botAppealReviews),
+    botMemories: safeArray(data.botMemories),
+    botMemorySummaries: safeArray(data.botMemorySummaries),
+    botModerationDecisions: safeArray(data.botModerationDecisions),
+    botSocialComments: safeArray(data.botSocialComments),
+    botRuleVersions: safeArray(data.botRuleVersions),
+    quarantinedContent: safeArray(data.quarantinedContent),
+    userRestrictions: safeArray(data.userRestrictions),
+    moderationAuditLogs: safeArray(data.moderationAuditLogs),
+    botModelHealth: safeArray(data.botModelHealth),
+    botStats: {
+      ...initialData.botStats,
+      ...(data.botStats || {}),
+    },
+    botTraining: {
+      ...initialData.botTraining,
+      ...(data.botTraining || {}),
+    },
+    botSettings: {
+      ...initialData.botSettings,
+      ...(data.botSettings || {}),
+    },
+    adminSettings: {
+      ...initialData.adminSettings,
+      ...(data.adminSettings || {}),
+    },
+  };
+
+  normalized.users = normalized.users.map((user, index) => {
+    const friends = safeArray(user.friends);
+    const emailVerified = user.emailVerified !== undefined ? Boolean(user.emailVerified) : true;
+    return {
+      ...user,
+      username: user.username || makeUniqueUsername(user.email?.split("@")[0] || user.fullName, normalized.users, user._id),
+      role: user.role || (index === 0 ? "creator" : "user"),
+      emailVerified,
+      emailVerifiedAt: user.emailVerifiedAt || (emailVerified ? user.createdAt || now() : null),
+      emailVerificationCodeHash: user.emailVerificationCodeHash || null,
+      emailVerificationExpiresAt: user.emailVerificationExpiresAt || null,
+      emailVerificationSentAt: user.emailVerificationSentAt || null,
+      pendingEmail: user.pendingEmail || null,
+      pendingEmailVerificationCodeHash: user.pendingEmailVerificationCodeHash || null,
+      pendingEmailVerificationExpiresAt: user.pendingEmailVerificationExpiresAt || null,
+      pendingEmailVerificationSentAt: user.pendingEmailVerificationSentAt || null,
+      passwordResetCodeHash: user.passwordResetCodeHash || null,
+      passwordResetExpiresAt: user.passwordResetExpiresAt || null,
+      passwordResetSentAt: user.passwordResetSentAt || null,
+      verifiedBadgeOverride: Boolean(user.verifiedBadgeOverride),
+      verifiedBadgeBlocked: Boolean(user.verifiedBadgeBlocked),
+      customBadges: safeArray(user.customBadges),
+      followers: safeArray(user.followers).length ? safeArray(user.followers) : friends,
+      following: safeArray(user.following).length ? safeArray(user.following) : friends,
+      friends,
+      isPrivate: Boolean(user.isPrivate),
+      allowMessagesFrom: user.allowMessagesFrom || "everyone",
+      showFollowers: user.showFollowers !== false,
+      showFollowing: user.showFollowing !== false,
+      showOnlineStatus: user.showOnlineStatus !== false,
+      readReceiptsEnabled: user.readReceiptsEnabled !== false,
+      theme: user.theme || "media",
+      security: {
+        emailCodeOnLogin: Boolean(user.security?.emailCodeOnLogin || user.emailCodeOnLogin),
+        loginAlertsEnabled: user.security?.loginAlertsEnabled ?? user.loginAlertsEnabled ?? true,
+        trustedDeviceIds: safeArray(user.security?.trustedDeviceIds),
+      },
+      interests: user.interests || user.algorithmProfile?.selectedInterests || [],
+      mutedInterests: user.mutedInterests || [],
+      blockedUsers: safeArray(user.blockedUsers),
+      mutedUsers: safeArray(user.mutedUsers),
+      mutedWords: safeArray(user.mutedWords),
+      learningLanguages: safeArray(user.learningLanguages).length ? safeArray(user.learningLanguages) : [user.learningLanguage].filter(Boolean),
+      isOnline: Boolean(user.isOnline),
+      inCall: Boolean(user.inCall),
+      lastSeen: user.lastSeen || user.updatedAt || user.createdAt || now(),
+      cameraEnabled: user.cameraEnabled !== false,
+      micEnabled: user.micEnabled !== false,
+      moderationRecords: safeArray(user.moderationRecords),
+      bannedUntil: user.bannedUntil || null,
+      banReason: user.banReason || "",
+      banIssuedAt: user.banIssuedAt || null,
+      banDays: user.banDays || null,
+      fullBannedAt: user.fullBannedAt || null,
+      fullBanReason: user.fullBanReason || "",
+      fullBanBy: user.fullBanBy || null,
+      messageBanUntil: user.messageBanUntil || null,
+      messageBanReason: user.messageBanReason || "",
+      shadowBannedUntil: user.shadowBannedUntil || null,
+      shadowBanReason: user.shadowBanReason || "",
+      botWarningCount: Number(user.botWarningCount || 0),
+      botMuteCount: Number(user.botMuteCount || 0),
+      botRestriction: {
+        postUntil: user.botRestriction?.postUntil || null,
+        commentUntil: user.botRestriction?.commentUntil || null,
+        messageUntil: user.botRestriction?.messageUntil || null,
+        reason: user.botRestriction?.reason || "",
+        issuedAt: user.botRestriction?.issuedAt || null,
+      },
+      algorithmProfile: {
+        ...defaultAlgorithmProfile(user),
+        ...(user.algorithmProfile || {}),
+        contentPreferences: {
+          ...defaultAlgorithmProfile(user).contentPreferences,
+          ...(user.algorithmProfile?.contentPreferences || {}),
+        },
+      },
+    };
+  });
+
+  normalized.messages = normalized.messages.map((message) => ({
+    ...message,
+    text: message.text || "",
+    media: message.media || null,
+    voice: message.voice || null,
+    gif: message.gif || null,
+    reactions: safeArray(message.reactions),
+    sharedPostId: message.sharedPostId || null,
+    replyTo: message.replyTo || null,
+    clientId: message.clientId || null,
+    status: message.status || "sent",
+    readBy: safeArray(message.readBy).length ? safeArray(message.readBy) : [message.sender].filter(Boolean),
+    editedAt: message.editedAt || null,
+    editHistory: safeArray(message.editHistory),
+    deletedAt: message.deletedAt || null,
+  }));
+
+  normalized.sessions = normalized.sessions.map((session) => ({
+    ...session,
+    _id: session._id || crypto.randomUUID(),
+    id: session.id || session._id,
+    deviceId: session.deviceId || session._id || crypto.randomUUID(),
+    deviceName: session.deviceName || "Unknown device",
+    browser: session.browser || "Unknown browser",
+    os: session.os || "Unknown OS",
+    ipAddress: session.ipAddress || "local",
+    approximateLocation: session.approximateLocation || "Unknown location",
+    locationDetails: session.locationDetails || {},
+    userAgent: session.userAgent || "",
+    trusted: Boolean(session.trusted),
+    revokedAt: session.revokedAt || null,
+    expiresAt: session.expiresAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    createdAt: session.createdAt || now(),
+    lastSeenAt: session.lastSeenAt || session.createdAt || now(),
+  }));
+
+  normalized.loginChallenges = normalized.loginChallenges.map((challenge) => ({
+    ...challenge,
+    _id: challenge._id || crypto.randomUUID(),
+    attempts: Number(challenge.attempts) || 0,
+    maxAttempts: Number(challenge.maxAttempts) || 5,
+    usedAt: challenge.usedAt || null,
+    revokedAt: challenge.revokedAt || null,
+    createdAt: challenge.createdAt || now(),
+    expiresAt: challenge.expiresAt || new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+  }));
+
+  normalized.posts = normalized.posts.map((post) => {
+    const rawMediaItems = Array.isArray(post.mediaItems) ? post.mediaItems.filter(Boolean) : [];
+    const mediaItems = rawMediaItems.length > 0 ? rawMediaItems : [post.media].filter(Boolean);
+    const primaryMedia = post.media || mediaItems[0] || null;
+    const hasOwnAudio = mediaItems.some((item) => ["video", "audio"].includes(item?.kind));
+    const song = post.song ? safeSongAttachment(post.song) : null;
+
+    return {
+      ...post,
+      media: primaryMedia,
+      mediaItems,
+      thumbnail: post.thumbnail || primaryMedia?.url || null,
+      content: post.content || post.text || "",
+      caption: post.caption || post.text || "",
+      mediaType: post.mediaType || (primaryMedia?.mimeType?.split("/")[0]) || (primaryMedia ? "file" : "text"),
+      targetLanguages: safeArray(post.targetLanguages),
+      hashtags: safeArray(post.hashtags),
+      detectedTags: safeArray(post.detectedTags),
+      finalTags: safeArray(post.finalTags).length ? safeArray(post.finalTags) : safeArray(post.hashtags),
+      category: post.category || "general",
+      subcategory: post.subcategory || "",
+      tone: post.tone || "neutral",
+      song,
+      audioLabel: post.audioLabel || (!song && hasOwnAudio ? "Original audio" : ""),
+      clientId: post.clientId || null,
+      status: post.status || "posted",
+      visibility: post.visibility || "public",
+      isArchived: post.isArchived ?? Boolean(post.archived),
+      isDeleted: Boolean(post.isDeleted),
+      dislikes: safeArray(post.dislikes),
+      saves: safeArray(post.saves),
+      views: safeArray(post.views),
+      hiddenBy: safeArray(post.hiddenBy),
+      likeCount: post.likeCount ?? post.likes?.length ?? 0,
+      dislikeCount: post.dislikeCount ?? post.dislikes?.length ?? 0,
+      saveCount: post.saveCount ?? post.saves?.length ?? 0,
+      repostCount: post.repostCount || 0,
+      shareCount: post.shareCount || 0,
+      viewCount: post.viewCount ?? post.views?.length ?? 0,
+      qualityScore: post.qualityScore ?? 60,
+      spamScore: post.spamScore ?? 0,
+      hotScore: post.hotScore ?? 0,
+      comments: normalizeCommentTree(safeArray(post.comments), post),
+      reportCount: post.reportCount || 0,
+    };
+  });
+
+  normalized.posts = normalized.posts.map((post) => ({
+    ...post,
+    commentCount: countCommentTree(post.comments || []),
+  }));
+
+  normalized.hashtags = normalized.hashtags.map((tag) => ({
+    ...tag,
+    name: tag.name || tag.normalizedName,
+    normalizedName: normalizeHashtag(tag.normalizedName || tag.name),
+    postCount: tag.postCount || 0,
+    dailyPostCount: tag.dailyPostCount || 0,
+    weeklyPostCount: tag.weeklyPostCount || 0,
+    trendingScore: tag.trendingScore || 0,
+    category: tag.category || "general",
+    language: tag.language || "all",
+    blocked: Boolean(tag.blocked),
+    lastUsedAt: tag.lastUsedAt || tag.updatedAt || tag.createdAt || now(),
+  }));
+
+  syncAllLanguageGroups(normalized);
+
+  return normalized;
+}
+
+async function backupCurrentDb() {
+  if (!env.AUTO_BACKUP_DB) return null;
+
+  try {
+    await fs.access(dbPath);
+  } catch {
+    return null;
+  }
+
+  await fs.mkdir(backupDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(backupDir, `db-${stamp}.json`);
+  await fs.copyFile(dbPath, backupPath);
+  return backupPath;
+}
+
+async function readLatestBackupData() {
+  try {
+    const files = await fs.readdir(backupDir);
+    const backups = files
+      .filter((file) => /^db-.+\.json$/.test(file))
+      .sort()
+      .reverse();
+
+    for (const file of backups) {
+      try {
+        const raw = await fs.readFile(path.join(backupDir, file), "utf8");
+        return JSON.parse(raw);
+      } catch {
+        // Try the next backup.
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function writeData(data) {
+  if (env.DB_DRIVER === "mongo") {
+    await persistDataToMongo(data);
+    return;
+  }
+
+  await fs.mkdir(dbDir, { recursive: true });
+  const tempPath = path.join(dbDir, `db.${process.pid}.${Date.now()}.tmp`);
+  const serialized = JSON.stringify(data, null, 2);
+
+  JSON.parse(serialized);
+  await backupCurrentDb();
+  await fs.writeFile(tempPath, serialized);
+
+  let renamed = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await fs.rename(tempPath, dbPath);
+      renamed = true;
+      break;
+    } catch (error) {
+      if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt === 3) {
+        break;
+      }
+      await wait(25 * (attempt + 1));
+    }
+  }
+
+  if (!renamed) {
+    try {
+      await fs.copyFile(tempPath, dbPath);
+    } finally {
+      await fs.unlink(tempPath).catch(() => {});
+    }
+  }
+
+}
+
+async function cleanupTempDataFiles() {
+  await fs.mkdir(dbDir, { recursive: true });
+  const files = await fs.readdir(dbDir);
+  await Promise.all(
+    files
+      .filter((file) => /^db\.\d+\.\d+\.tmp$/.test(file))
+      .map((file) => fs.unlink(path.join(dbDir, file)).catch(() => {}))
+  );
+}
+
+async function withData(mutator) {
+  const run = queue.catch(() => {}).then(async () => {
+    const data = await readData();
+    const result = await mutator(data);
+    const normalizedForWrite = normalizeData(data);
+    await writeData(normalizedForWrite);
+    return clone(result);
+  });
+
+  queue = run.catch(() => {});
+  return run;
+}
+
+export async function initLocalStore() {
+  await ensureStore();
+  await cleanupTempDataFiles();
+  await ensureEnvAdmin();
+  await ensureEnvBot();
+}
+
+export async function backupLocalStore() {
+  return backupCurrentDb();
+}
+
+export async function resetLocalStoreForFreshLaunch() {
+  await ensureStore();
+  const backupPath = await backupCurrentDb();
+  await writeData(clone(initialData));
+  await ensureEnvAdmin();
+  await ensureEnvBot();
+  return { success: true, backupPath, dbPath };
+}
+
+export function getLocalDbPath() {
+  return dbPath;
+}
+
+export function getMediaDirectory() {
+  return mediaDir;
+}
+
+function getEnvAdminConfig() {
+  const username = slugify(process.env.ADMIN_USERNAME || "admin");
+  const password = process.env.ADMIN_PASSWORD || "admin12345";
+  const email = (process.env.ADMIN_EMAIL || `${username}@bettermedia.local`).trim().toLowerCase();
+  const fullName = (process.env.ADMIN_NAME || "Better Media Admin").trim();
+
+  return {
+    username,
+    password,
+    email,
+    fullName,
+  };
+}
+
+function getEnvBotConfig() {
+  const username = slugify(process.env.BOT_USERNAME || "modbot");
+  const password = process.env.BOT_PASSWORD || "modbot12345";
+  const email = (process.env.BOT_EMAIL || `${username}@bettermedia.local`).trim().toLowerCase();
+  const fullName = (process.env.BOT_NAME || "MEDIA ModBot").trim();
+
+  return { username, password, email, fullName };
+}
+
+async function ensureEnvAdmin() {
+  return withData(async (data) => {
+    const config = getEnvAdminConfig();
+    const createdAt = now();
+    let admin = data.users.find(
+      (user) =>
+        user.username?.toLowerCase() === config.username.toLowerCase() ||
+        user.email?.toLowerCase() === config.email
+    );
+
+    if (!admin) {
+      admin = {
+        _id: crypto.randomUUID(),
+        fullName: config.fullName,
+        username: makeUniqueUsername(config.username, data.users),
+        email: config.email,
+        password: await bcrypt.hash(config.password, env.BCRYPT_ROUNDS),
+        bio: "Local admin for this PC.",
+        profilePic: makeLocalAvatar(config.fullName),
+        nativeLanguage: "english",
+        learningLanguage: "spanish",
+        location: "Local PC",
+        isOnboarded: true,
+        role: "admin",
+        emailVerified: true,
+        emailVerifiedAt: createdAt,
+        emailVerificationCodeHash: null,
+        emailVerificationExpiresAt: null,
+        emailVerificationSentAt: null,
+        pendingEmail: null,
+        pendingEmailVerificationCodeHash: null,
+        pendingEmailVerificationExpiresAt: null,
+        pendingEmailVerificationSentAt: null,
+        passwordResetCodeHash: null,
+        passwordResetExpiresAt: null,
+        passwordResetSentAt: null,
+        verifiedBadgeOverride: false,
+        verifiedBadgeBlocked: false,
+        customBadges: [],
+        friends: [],
+        followers: [],
+        following: [],
+        isPrivate: false,
+        allowMessagesFrom: "everyone",
+        showFollowers: true,
+        showFollowing: true,
+        showOnlineStatus: true,
+        readReceiptsEnabled: true,
+        theme: "media",
+        blockedUsers: [],
+        isOnline: false,
+        inCall: false,
+        lastSeen: createdAt,
+        cameraEnabled: true,
+        micEnabled: true,
+        moderationRecords: [],
+        bannedUntil: null,
+        banReason: "",
+        messageBanUntil: null,
+        messageBanReason: "",
+        shadowBannedUntil: null,
+        shadowBanReason: "",
+        createdAt,
+        updatedAt: createdAt,
+      };
+      data.users.unshift(admin);
+    } else {
+      admin.fullName = admin.fullName || config.fullName;
+      admin.username = config.username;
+      admin.email = config.email;
+      admin.password = await bcrypt.hash(config.password, env.BCRYPT_ROUNDS);
+      admin.role = "admin";
+      admin.isOnboarded = true;
+      admin.emailVerified = true;
+      admin.showOnlineStatus = admin.showOnlineStatus !== false;
+      admin.theme ||= "media";
+      admin.emailVerifiedAt = admin.emailVerifiedAt || createdAt;
+      admin.bannedUntil = null;
+      admin.banReason = "";
+      admin.banIssuedAt = null;
+      admin.banDays = null;
+      admin.fullBannedAt = null;
+      admin.fullBanReason = "";
+      admin.fullBanBy = null;
+      admin.messageBanUntil = null;
+      admin.messageBanReason = "";
+      admin.shadowBannedUntil = null;
+      admin.shadowBanReason = "";
+      admin.profilePic = admin.profilePic || makeLocalAvatar(admin.fullName);
+      admin.updatedAt = now();
+    }
+
+    syncLanguageGroupsForUser(data, admin);
+    refreshLanguageGroupCounts(data);
+    return publicUser(admin);
+  });
+}
+
+async function ensureEnvBot() {
+  return withData(async (data) => {
+    const config = getEnvBotConfig();
+    const createdAt = now();
+    let bot = data.users.find(
+      (user) =>
+        user.isBot ||
+        user.username?.toLowerCase() === config.username.toLowerCase() ||
+        user.email?.toLowerCase() === config.email
+    );
+
+    if (!bot) {
+      bot = {
+        _id: crypto.randomUUID(),
+        fullName: config.fullName,
+        username: makeUniqueUsername(config.username, data.users),
+        email: config.email,
+        password: await bcrypt.hash(config.password, env.BCRYPT_ROUNDS),
+        bio: "Local Hugging Face moderation assistant running on this PC.",
+        profilePic: makeLocalAvatar(config.fullName),
+        nativeLanguage: "english",
+        learningLanguage: "spanish",
+        location: "Local PC",
+        isOnboarded: true,
+        role: "mod",
+        isBot: true,
+        emailVerified: true,
+        emailVerifiedAt: createdAt,
+        emailVerificationCodeHash: null,
+        emailVerificationExpiresAt: null,
+        emailVerificationSentAt: null,
+        pendingEmail: null,
+        pendingEmailVerificationCodeHash: null,
+        pendingEmailVerificationExpiresAt: null,
+        pendingEmailVerificationSentAt: null,
+        passwordResetCodeHash: null,
+        passwordResetExpiresAt: null,
+        passwordResetSentAt: null,
+        verifiedBadgeOverride: false,
+        verifiedBadgeBlocked: false,
+        customBadges: ["languagePro"],
+        friends: [],
+        followers: [],
+        following: [],
+        isPrivate: false,
+        allowMessagesFrom: "everyone",
+        showFollowers: true,
+        showFollowing: true,
+        showOnlineStatus: true,
+        readReceiptsEnabled: true,
+        theme: "media",
+        blockedUsers: [],
+        isOnline: true,
+        inCall: false,
+        lastSeen: createdAt,
+        cameraEnabled: false,
+        micEnabled: true,
+        moderationRecords: [],
+        bannedUntil: null,
+        banReason: "",
+        messageBanUntil: null,
+        messageBanReason: "",
+        shadowBannedUntil: null,
+        shadowBanReason: "",
+        createdAt,
+        updatedAt: createdAt,
+      };
+      data.users.push(bot);
+    } else {
+      bot.fullName = config.fullName;
+      bot.username = config.username;
+      bot.email = config.email;
+      bot.password = await bcrypt.hash(config.password, env.BCRYPT_ROUNDS);
+      bot.role = "mod";
+      bot.isBot = true;
+      bot.isOnboarded = true;
+      bot.emailVerified = true;
+      bot.bio = bot.bio || "Local Hugging Face moderation assistant running on this PC.";
+      bot.profilePic = bot.profilePic || makeLocalAvatar(config.fullName);
+      bot.allowMessagesFrom = "everyone";
+      bot.showOnlineStatus = bot.showOnlineStatus !== false;
+      bot.theme ||= "media";
+      bot.customBadges ||= [];
+      if (!bot.customBadges.includes("languagePro")) bot.customBadges.push("languagePro");
+      bot.updatedAt = now();
+    }
+
+    syncLanguageGroupsForUser(data, bot);
+    refreshLanguageGroupCounts(data);
+    return publicUser(bot);
+  });
+}
+
+async function saveDataUrlMedia(dataUrl, fallbackName = "media") {
+  if (!dataUrl || !isDataUrl(dataUrl)) return null;
+
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+
+  const [fullDataUrl, mimeType] = match;
+  const upload = await saveUploadDataUrl({ dataUrl: fullDataUrl, filename: fallbackName });
+
+  return {
+    url: upload.url,
+    publicUrl: upload.publicUrl,
+    filename: upload.filename,
+    mimeType,
+    size: upload.size,
+    driver: upload.driver,
+    kind: mimeType.startsWith("video/")
+      ? "video"
+      : mimeType.startsWith("audio/")
+        ? "audio"
+        : mimeType.startsWith("image/")
+          ? "image"
+          : "file",
+  };
+}
+
+export async function findUserByEmail(email) {
+  const data = await readData();
+  const normalizedEmail = email.trim().toLowerCase();
+  return clone(data.users.find((user) => user.email === normalizedEmail) || null);
+}
+
+export async function findUserByLogin(login) {
+  const data = await readData();
+  const normalizedLogin = login.trim().toLowerCase();
+  return clone(
+    data.users.find(
+      (user) =>
+        user.email?.toLowerCase() === normalizedLogin ||
+        user.username?.toLowerCase() === normalizedLogin
+    ) || null
+  );
+}
+
+export async function getUserById(userId) {
+  const data = await readData();
+  return clone(data.users.find((user) => user._id === normalizeId(userId)) || null);
+}
+
+export async function getPublicUserById(userId) {
+  const user = await getUserById(userId);
+  return publicUser(user);
+}
+
+export async function getUserProfileFor(viewerId, profileId) {
+  const data = await readData();
+  const user = data.users.find((item) => item._id === normalizeId(profileId));
+  if (!user) return null;
+  return withRelationship(user, viewerId, data);
+}
+
+export async function createUser({ email, fullName, password, profilePic }) {
+  return withData(async (data) => {
+    const normalizedEmail = email.trim().toLowerCase();
+    const existingUser = data.users.find(
+      (user) =>
+        user.email?.toLowerCase() === normalizedEmail ||
+        user.pendingEmail?.toLowerCase() === normalizedEmail
+    );
+
+    if (existingUser) {
+      const error = new Error("Email already exists, please use a different one");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    const user = {
+      _id: crypto.randomUUID(),
+      fullName: fullName.trim(),
+      username: makeUniqueUsername(email.split("@")[0] || fullName, data.users),
+      email: normalizedEmail,
+      password: await bcrypt.hash(password, env.BCRYPT_ROUNDS),
+      bio: "",
+      profilePic: profilePic || makeLocalAvatar(fullName),
+      nativeLanguage: "",
+      learningLanguage: "",
+      learningLanguages: [],
+      location: "",
+      isOnboarded: false,
+      role: data.users.length === 0 ? "creator" : "user",
+      emailVerified: false,
+      emailVerifiedAt: null,
+      emailVerificationCodeHash: null,
+      emailVerificationExpiresAt: null,
+      emailVerificationSentAt: null,
+      pendingEmail: null,
+      pendingEmailVerificationCodeHash: null,
+      pendingEmailVerificationExpiresAt: null,
+      pendingEmailVerificationSentAt: null,
+      passwordResetCodeHash: null,
+      passwordResetExpiresAt: null,
+      passwordResetSentAt: null,
+      verifiedBadgeOverride: false,
+      verifiedBadgeBlocked: false,
+      customBadges: [],
+      friends: [],
+      followers: [],
+      following: [],
+      isPrivate: false,
+      allowMessagesFrom: "everyone",
+      showFollowers: true,
+      showFollowing: true,
+      showOnlineStatus: true,
+      readReceiptsEnabled: true,
+      theme: "media",
+      security: {
+        emailCodeOnLogin: false,
+        loginAlertsEnabled: true,
+        trustedDeviceIds: [],
+      },
+      interests: [],
+      mutedInterests: [],
+      blockedUsers: [],
+      mutedUsers: [],
+      mutedWords: [],
+      isOnline: false,
+      inCall: false,
+      lastSeen: createdAt,
+      cameraEnabled: true,
+      micEnabled: true,
+      moderationRecords: [],
+      bannedUntil: null,
+      banReason: "",
+      banIssuedAt: null,
+      banDays: null,
+      fullBannedAt: null,
+      fullBanReason: "",
+      fullBanBy: null,
+      messageBanUntil: null,
+      messageBanReason: "",
+      shadowBannedUntil: null,
+      shadowBanReason: "",
+      algorithmProfile: defaultAlgorithmProfile(),
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.users.push(user);
+    syncLanguageGroupsForUser(data, user);
+    refreshLanguageGroupCounts(data);
+    return publicUser(user);
+  });
+}
+
+export async function verifyPassword(user, enteredPassword) {
+  if (!user?.password) return false;
+  return bcrypt.compare(enteredPassword, user.password);
+}
+
+function requireEmailVerified(user, action = "use this feature") {
+  if (user?.emailVerified) return;
+
+  const error = new Error(`Verify your email before you ${action}.`);
+  error.status = 403;
+  error.code = "EMAIL_NOT_VERIFIED";
+  throw error;
+}
+
+export async function startEmailVerificationFor(userId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const isPendingEmail = Boolean(user.pendingEmail);
+    if (user.emailVerified && !isPendingEmail) {
+      return { user: publicUser(user), code: null, email: user.email, alreadyVerified: true };
+    }
+
+    const sentAt = isPendingEmail ? user.pendingEmailVerificationSentAt : user.emailVerificationSentAt;
+    if (sentAt && Date.now() - new Date(sentAt).getTime() < 60 * 1000) {
+      const error = new Error("Please wait 60 seconds before sending another code.");
+      error.status = 429;
+      error.code = "CODE_COOLDOWN";
+      throw error;
+    }
+
+    const code = makeCode();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    if (isPendingEmail) {
+      user.pendingEmailVerificationCodeHash = hashCode(code);
+      user.pendingEmailVerificationExpiresAt = expiresAt;
+      user.pendingEmailVerificationSentAt = now();
+    } else {
+      user.emailVerificationCodeHash = hashCode(code);
+      user.emailVerificationExpiresAt = expiresAt;
+      user.emailVerificationSentAt = now();
+    }
+    user.updatedAt = now();
+
+    return {
+      user: publicUser(user),
+      code,
+      email: isPendingEmail ? user.pendingEmail : user.email,
+      expiresAt,
+      alreadyVerified: false,
+      pendingEmail: isPendingEmail,
+    };
+  });
+}
+
+export async function verifyEmailCodeFor(userId, code) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const isPendingEmail = Boolean(user.pendingEmail);
+    const codeHash = isPendingEmail
+      ? user.pendingEmailVerificationCodeHash
+      : user.emailVerificationCodeHash;
+    const expiresAt = isPendingEmail
+      ? user.pendingEmailVerificationExpiresAt
+      : user.emailVerificationExpiresAt;
+
+    if (user.emailVerified && !isPendingEmail) return publicUser(user);
+
+    if (!codeHash || !isFuture(expiresAt)) {
+      const error = new Error("Verification code expired. Send a new code and try again.");
+      error.status = 400;
+      error.code = "CODE_EXPIRED";
+      throw error;
+    }
+
+    if (hashCode(code) !== codeHash) {
+      const error = new Error("That verification code is not correct.");
+      error.status = 400;
+      error.code = "BAD_CODE";
+      throw error;
+    }
+
+    if (isPendingEmail) {
+      const emailTaken = data.users.some(
+        (item) =>
+          item._id !== user._id &&
+          (item.email?.toLowerCase() === user.pendingEmail.toLowerCase() ||
+            item.pendingEmail?.toLowerCase() === user.pendingEmail.toLowerCase())
+      );
+
+      if (emailTaken) {
+        const error = new Error("That email is already used by another account.");
+        error.status = 400;
+        throw error;
+      }
+
+      user.email = user.pendingEmail;
+      user.pendingEmail = null;
+      user.pendingEmailVerificationCodeHash = null;
+      user.pendingEmailVerificationExpiresAt = null;
+      user.pendingEmailVerificationSentAt = null;
+    }
+
+    user.emailVerified = true;
+    user.emailVerifiedAt = now();
+    user.emailVerificationCodeHash = null;
+    user.emailVerificationExpiresAt = null;
+    user.emailVerificationSentAt = null;
+    user.updatedAt = now();
+
+    addNotification(data, user._id, {
+      type: "email-verified",
+      title: "Email verified",
+      message: isPendingEmail
+        ? "Your new email is verified and now belongs to your account."
+        : "Your account is verified. Posting, messaging, follows, and reports are now unlocked.",
+    });
+
+    return publicUser(user);
+  });
+}
+
+export async function startPasswordResetFor(login) {
+  return withData(async (data) => {
+    const normalizedLogin = login.trim().toLowerCase();
+    const user = data.users.find(
+      (item) =>
+        item.email?.toLowerCase() === normalizedLogin ||
+        item.username?.toLowerCase() === normalizedLogin
+    );
+
+    if (!user) return null;
+
+    if (user.passwordResetSentAt && Date.now() - new Date(user.passwordResetSentAt).getTime() < 60 * 1000) {
+      const error = new Error("Please wait 60 seconds before sending another reset code.");
+      error.status = 429;
+      error.code = "CODE_COOLDOWN";
+      throw error;
+    }
+
+    const code = makeCode();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    user.passwordResetCodeHash = hashCode(code);
+    user.passwordResetExpiresAt = expiresAt;
+    user.passwordResetSentAt = now();
+    user.updatedAt = now();
+
+    return {
+      user: publicUser(user),
+      code,
+      expiresAt,
+    };
+  });
+}
+
+export async function resetPasswordFor(login, code, password) {
+  return withData(async (data) => {
+    const normalizedLogin = login.trim().toLowerCase();
+    const user = data.users.find(
+      (item) =>
+        item.email?.toLowerCase() === normalizedLogin ||
+        item.username?.toLowerCase() === normalizedLogin
+    );
+
+    if (!user) {
+      const error = new Error("We could not find an account for that email or username.");
+      error.status = 404;
+      throw error;
+    }
+
+    if (!user.passwordResetCodeHash || !isFuture(user.passwordResetExpiresAt)) {
+      const error = new Error("Reset code expired. Send a new code and try again.");
+      error.status = 400;
+      error.code = "CODE_EXPIRED";
+      throw error;
+    }
+
+    if (hashCode(code) !== user.passwordResetCodeHash) {
+      const error = new Error("That reset code is not correct.");
+      error.status = 400;
+      error.code = "BAD_CODE";
+      throw error;
+    }
+
+    user.password = await bcrypt.hash(password, env.BCRYPT_ROUNDS);
+    user.passwordResetCodeHash = null;
+    user.passwordResetExpiresAt = null;
+    user.passwordResetSentAt = null;
+    user.updatedAt = now();
+
+    addNotification(data, user._id, {
+      type: "password-reset",
+      title: "Password changed",
+      message: "Your password was reset successfully.",
+    });
+
+    return publicUser(user);
+  });
+}
+
+function publicSession(session, currentSessionId = null) {
+  if (!session) return null;
+  const { tokenHash, ...safeSession } = session;
+  const country =
+    session.locationDetails?.country ||
+    session.locationDetails?.countryCode ||
+    "";
+  return {
+    ...safeSession,
+    id: session._id,
+    loginCountry: country,
+    loginOrigin: formatLoginOrigin(session),
+    current: Boolean(currentSessionId && session._id === normalizeId(currentSessionId)),
+  };
+}
+
+export async function createSessionFor(userId, meta = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+
+    const createdAt = now();
+    const sessionId = crypto.randomUUID();
+    const deviceId = meta.deviceId || crypto.randomUUID();
+    user.security ||= { emailCodeOnLogin: false, loginAlertsEnabled: true, trustedDeviceIds: [] };
+
+    const session = {
+      _id: sessionId,
+      userId: user._id,
+      tokenHash: hashCode(`${sessionId}:${user._id}`),
+      deviceId,
+      deviceName: textLimit(meta.deviceName || `${meta.browser || "Browser"} on ${meta.os || "this device"}`, 100),
+      browser: textLimit(meta.browser || "Unknown browser", 80),
+      os: textLimit(meta.os || "Unknown OS", 80),
+      ipAddress: textLimit(meta.ipAddress || "local", 80),
+      approximateLocation: textLimit(meta.approximateLocation || "Unknown location", 120),
+      locationDetails:
+        meta.locationDetails && typeof meta.locationDetails === "object"
+          ? {
+              city: textLimit(meta.locationDetails.city || "", 80),
+              region: textLimit(meta.locationDetails.region || "", 80),
+              country: textLimit(meta.locationDetails.country || "", 80),
+              countryCode: textLimit(meta.locationDetails.countryCode || "", 12),
+              latitude: textLimit(meta.locationDetails.latitude || "", 40),
+              longitude: textLimit(meta.locationDetails.longitude || "", 40),
+              timezone: textLimit(meta.locationDetails.timezone || "", 80),
+            }
+          : {},
+      userAgent: textLimit(meta.userAgent || "", 500),
+      trusted: user.security.trustedDeviceIds.includes(deviceId),
+      createdAt,
+      lastSeenAt: createdAt,
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    data.sessions.push(session);
+    user.lastSeen = createdAt;
+    user.updatedAt = createdAt;
+    addNotification(data, user._id, {
+      type: "login-alert",
+      title: "New login",
+      message: `${session.deviceName} logged in from ${formatLoginOrigin(session)}.`,
+    });
+    return publicSession(session, sessionId);
+  });
+}
+
+export async function verifySessionFor(userId, sessionId) {
+  if (!sessionId) return true;
+  const data = await readData();
+  const session = data.sessions.find(
+    (item) => item._id === normalizeId(sessionId) && item.userId === normalizeId(userId)
+  );
+  return Boolean(session && !session.revokedAt && isFuture(session.expiresAt));
+}
+
+export async function getSessionsForUser(userId, currentSessionId = null) {
+  const data = await readData();
+  return data.sessions
+    .filter((session) => session.userId === normalizeId(userId))
+    .filter((session) => !session.revokedAt && isFuture(session.expiresAt))
+    .sort((a, b) => new Date(b.lastSeenAt || b.createdAt) - new Date(a.lastSeenAt || a.createdAt))
+    .map((session) => publicSession(session, currentSessionId));
+}
+
+export async function revokeSessionFor(userId, sessionId) {
+  return withData(async (data) => {
+    const session = data.sessions.find(
+      (item) => item._id === normalizeId(sessionId) && item.userId === normalizeId(userId)
+    );
+    if (!session) throw Object.assign(new Error("Session not found"), { status: 404 });
+    session.revokedAt = now();
+    return { success: true, sessionId: normalizeId(sessionId) };
+  });
+}
+
+export async function revokeOtherSessionsFor(userId, currentSessionId = null) {
+  return withData(async (data) => {
+    const revokedAt = now();
+    let count = 0;
+    data.sessions.forEach((session) => {
+      if (
+        session.userId === normalizeId(userId) &&
+        session._id !== normalizeId(currentSessionId) &&
+        !session.revokedAt
+      ) {
+        session.revokedAt = revokedAt;
+        count += 1;
+      }
+    });
+    return { success: true, revoked: count };
+  });
+}
+
+export async function revokeAllSessionsFor(userId) {
+  return withData(async (data) => {
+    const revokedAt = now();
+    let count = 0;
+    data.sessions.forEach((session) => {
+      if (session.userId === normalizeId(userId) && !session.revokedAt) {
+        session.revokedAt = revokedAt;
+        count += 1;
+      }
+    });
+    return { success: true, revoked: count };
+  });
+}
+
+export async function setSessionTrustFor(userId, sessionId, trusted = true) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const session = data.sessions.find(
+      (item) => item._id === normalizeId(sessionId) && item.userId === normalizeId(userId)
+    );
+
+    if (!user || !session) throw Object.assign(new Error("Session not found"), { status: 404 });
+
+    user.security ||= { emailCodeOnLogin: false, loginAlertsEnabled: true, trustedDeviceIds: [] };
+    user.security.trustedDeviceIds ||= [];
+    if (trusted && !user.security.trustedDeviceIds.includes(session.deviceId)) {
+      user.security.trustedDeviceIds.push(session.deviceId);
+    }
+    if (!trusted) {
+      user.security.trustedDeviceIds = user.security.trustedDeviceIds.filter((id) => id !== session.deviceId);
+    }
+    session.trusted = Boolean(trusted);
+    session.updatedAt = now();
+    return publicSession(session, sessionId);
+  });
+}
+
+export async function startLoginChallengeFor(userId, meta = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+
+    const recent = data.loginChallenges.find(
+      (challenge) =>
+        challenge.userId === user._id &&
+        !challenge.usedAt &&
+        !challenge.revokedAt &&
+        Date.now() - new Date(challenge.createdAt).getTime() < 60 * 1000
+    );
+    if (recent) {
+      const error = new Error("Please wait before requesting another login code.");
+      error.status = 429;
+      error.code = "CODE_COOLDOWN";
+      throw error;
+    }
+
+    const code = makeCode();
+    const createdAt = now();
+    const challenge = {
+      _id: crypto.randomUUID(),
+      userId: user._id,
+      codeHash: hashCode(code),
+      attempts: 0,
+      maxAttempts: 5,
+      deviceMeta: meta,
+      createdAt,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      usedAt: null,
+      revokedAt: null,
+    };
+    data.loginChallenges.push(challenge);
+
+    return {
+      challengeId: challenge._id,
+      code,
+      expiresAt: challenge.expiresAt,
+      user: publicUser(user),
+    };
+  });
+}
+
+export async function verifyLoginChallengeFor(challengeId, code = "") {
+  return withData(async (data) => {
+    const challenge = data.loginChallenges.find((item) => item._id === normalizeId(challengeId));
+    const genericError = Object.assign(new Error("Invalid or expired code."), {
+      status: 400,
+      code: "INVALID_LOGIN_CODE",
+    });
+
+    if (!challenge || challenge.usedAt || challenge.revokedAt || !isFuture(challenge.expiresAt)) {
+      throw genericError;
+    }
+
+    if (challenge.attempts >= challenge.maxAttempts) {
+      challenge.revokedAt = now();
+      throw genericError;
+    }
+
+    if (hashCode(code) !== challenge.codeHash) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= challenge.maxAttempts) challenge.revokedAt = now();
+      throw genericError;
+    }
+
+    const user = data.users.find((item) => item._id === challenge.userId);
+    if (!user) throw genericError;
+
+    challenge.usedAt = now();
+    return {
+      user: publicUser(user),
+      userId: user._id,
+      deviceMeta: challenge.deviceMeta || {},
+    };
+  });
+}
+
+const textLimit = (value = "", max = 120) => value.toString().trim().slice(0, max);
+const languageValue = (value = "") => textLimit(value, 80).toLowerCase();
+const messagePrivacyOptions = new Set(["everyone", "followers", "following", "mutuals", "nobody"]);
+
+function languageGroupSlug(type, language) {
+  const prefix = type === "native_language" ? "native" : "learning";
+  return `${prefix}-${languageValue(language).replace(/\s+/g, "-")}`;
+}
+
+function languageGroupName(type, language) {
+  const label = formatLanguageLabel(language);
+  return type === "native_language" ? `${label} Speakers` : `Learning ${label}`;
+}
+
+function languageGroupDescription(type, language) {
+  const label = formatLanguageLabel(language);
+  return type === "native_language"
+    ? `People who speak ${label} natively.`
+    : `People learning and practicing ${label}.`;
+}
+
+function makeLanguageGroup(type, language, existing = {}) {
+  const createdAt = existing.createdAt || now();
+  const slug = languageGroupSlug(type, language);
+
+  return {
+    _id: existing._id || slug,
+    id: existing.id || existing._id || slug,
+    slug,
+    name: existing.name || languageGroupName(type, language),
+    type,
+    language: languageValue(language),
+    description: existing.description || languageGroupDescription(type, language),
+    memberIds: [...new Set(safeArray(existing.memberIds))],
+    autoMemberIds: [...new Set(safeArray(existing.autoMemberIds))],
+    manualMemberIds: [...new Set(safeArray(existing.manualMemberIds))],
+    postCount: Number(existing.postCount || 0),
+    createdAt,
+    updatedAt: existing.updatedAt || createdAt,
+    isSystem: true,
+  };
+}
+
+function ensureLanguageGroups(data) {
+  data.languageGroups ||= [];
+  const existingBySlug = new Map(data.languageGroups.map((group) => [group.slug, group]));
+  const groups = [];
+
+  NORMALIZED_LANGUAGES.forEach((language) => {
+    ["native_language", "learning_language"].forEach((type) => {
+      const slug = languageGroupSlug(type, language);
+      groups.push(makeLanguageGroup(type, language, existingBySlug.get(slug)));
+      existingBySlug.delete(slug);
+    });
+  });
+
+  data.languageGroups = [
+    ...groups,
+    ...Array.from(existingBySlug.values()).map((group) =>
+      group.isSystem ? makeLanguageGroup(group.type, group.language, group) : group
+    ),
+  ];
+  return data.languageGroups;
+}
+
+function userLearningLanguages(user = {}) {
+  return [
+    user.learningLanguage,
+    ...(Array.isArray(user.learningLanguages) ? user.learningLanguages : []),
+  ]
+    .map(languageValue)
+    .filter(Boolean);
+}
+
+function syncLanguageGroupsForUser(data, user) {
+  if (!user) return;
+  ensureLanguageGroups(data);
+  const userId = user._id;
+
+  data.languageGroups.forEach((group) => {
+    if (!group.isSystem) return;
+    group.memberIds ||= [];
+    group.autoMemberIds ||= [];
+    group.manualMemberIds ||= [];
+
+    if (group.autoMemberIds.includes(userId)) {
+      group.autoMemberIds = group.autoMemberIds.filter((id) => id !== userId);
+      if (!group.manualMemberIds.includes(userId)) {
+        group.memberIds = group.memberIds.filter((id) => id !== userId);
+      }
+    }
+  });
+
+  const memberships = [];
+  const nativeLanguage = languageValue(user.nativeLanguage);
+  if (nativeLanguage) memberships.push({ type: "native_language", language: nativeLanguage });
+  userLearningLanguages(user).forEach((language) =>
+    memberships.push({ type: "learning_language", language })
+  );
+
+  memberships.forEach(({ type, language }) => {
+    const group = data.languageGroups.find((item) => item.slug === languageGroupSlug(type, language));
+    if (!group) return;
+    group.memberIds = [...new Set([...(group.memberIds || []), userId])];
+    group.autoMemberIds = [...new Set([...(group.autoMemberIds || []), userId])];
+    group.updatedAt = now();
+  });
+}
+
+function refreshLanguageGroupCounts(data) {
+  ensureLanguageGroups(data);
+  data.languageGroups.forEach((group) => {
+    if (!group.isSystem) return;
+    group.memberIds = [...new Set(group.memberIds || [])].filter((id) =>
+      data.users.some((user) => user._id === id && user.isOnboarded)
+    );
+    group.autoMemberIds = [...new Set(group.autoMemberIds || [])].filter((id) =>
+      data.users.some((user) => user._id === id)
+    );
+    group.postCount = data.posts.filter(
+      (post) => !post.repostOf && !post.isDeleted && !post.isArchived && post.language === group.language
+    ).length;
+  });
+}
+
+function syncAllLanguageGroups(data) {
+  ensureLanguageGroups(data);
+  data.users.forEach((user) => syncLanguageGroupsForUser(data, user));
+  refreshLanguageGroupCounts(data);
+}
+const allowedMessageReactions = new Set(["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥"]);
+
+function formatLoginOrigin(session = {}) {
+  const details = session.locationDetails || {};
+  const city = details.city || "";
+  const region = details.region || "";
+  const country = details.country || details.countryCode || "";
+  const place = [city, region, country].filter(Boolean).join(", ");
+  return place || session.approximateLocation || "an unknown location";
+}
+
+function validateUsername(value = "") {
+  const username = value.toString().trim().toLowerCase();
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) {
+    const error = new Error("Username must be 3-24 characters and use only letters, numbers, and underscores.");
+    error.status = 400;
+    throw error;
+  }
+  return username;
+}
+
+export async function updateUser(userId, updates) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) return null;
+
+    if (updates.fullName !== undefined) {
+      const fullName = textLimit(updates.fullName, 80);
+      if (fullName.length < 2) {
+        const error = new Error("Display name must be at least 2 characters.");
+        error.status = 400;
+        throw error;
+      }
+      user.fullName = fullName;
+    }
+
+    if (updates.username !== undefined) {
+      user.username = makeUniqueUsername(validateUsername(updates.username), data.users, user._id);
+    }
+
+    if (updates.bio !== undefined) user.bio = textLimit(updates.bio, 240);
+    if (updates.location !== undefined) user.location = textLimit(updates.location, 80);
+    if (updates.nativeLanguage !== undefined) user.nativeLanguage = languageValue(updates.nativeLanguage);
+    if (updates.learningLanguage !== undefined) user.learningLanguage = languageValue(updates.learningLanguage);
+    if (updates.learningLanguages !== undefined) {
+      const values = Array.isArray(updates.learningLanguages)
+        ? updates.learningLanguages
+        : updates.learningLanguages.toString().split(",");
+      user.learningLanguages = values.map(languageValue).filter(Boolean).slice(0, 12);
+      if (user.learningLanguages[0]) user.learningLanguage = user.learningLanguages[0];
+    }
+    if (updates.profilePic !== undefined) {
+      const profilePic = updates.profilePic?.toString() || "";
+      user.profilePic = profilePic.slice(0, 300000) || makeLocalAvatar(user.fullName);
+    }
+
+    if (updates.isOnboarded !== undefined) user.isOnboarded = Boolean(updates.isOnboarded);
+    if (updates.isPrivate !== undefined) user.isPrivate = Boolean(updates.isPrivate);
+    if (updates.showFollowers !== undefined) user.showFollowers = Boolean(updates.showFollowers);
+    if (updates.showFollowing !== undefined) user.showFollowing = Boolean(updates.showFollowing);
+    if (updates.showOnlineStatus !== undefined) user.showOnlineStatus = Boolean(updates.showOnlineStatus);
+    if (updates.readReceiptsEnabled !== undefined) user.readReceiptsEnabled = Boolean(updates.readReceiptsEnabled);
+    if (updates.theme !== undefined) {
+      user.theme = textLimit(updates.theme, 40).toLowerCase() || "media";
+    }
+    if (updates.security !== undefined || updates.emailCodeOnLogin !== undefined || updates.loginAlertsEnabled !== undefined) {
+      user.security ||= { emailCodeOnLogin: false, loginAlertsEnabled: true, trustedDeviceIds: [] };
+      if (updates.security?.emailCodeOnLogin !== undefined || updates.emailCodeOnLogin !== undefined) {
+        user.security.emailCodeOnLogin = Boolean(updates.security?.emailCodeOnLogin ?? updates.emailCodeOnLogin);
+      }
+      if (updates.security?.loginAlertsEnabled !== undefined || updates.loginAlertsEnabled !== undefined) {
+        user.security.loginAlertsEnabled = Boolean(updates.security?.loginAlertsEnabled ?? updates.loginAlertsEnabled);
+      }
+      user.security.trustedDeviceIds ||= [];
+    }
+    if (updates.interests !== undefined) {
+      const values = Array.isArray(updates.interests) ? updates.interests : updates.interests.toString().split(",");
+      user.interests = values.map(normalizeHashtag).filter(Boolean).slice(0, 40);
+      user.algorithmProfile ||= defaultAlgorithmProfile(user);
+      user.algorithmProfile.selectedInterests = user.interests;
+      user.interests.forEach((tag) => {
+        user.algorithmProfile.interestWeights[tag] = Math.max(Number(user.algorithmProfile.interestWeights[tag]) || 0, 12);
+      });
+    }
+    if (updates.mutedInterests !== undefined) {
+      const values = Array.isArray(updates.mutedInterests) ? updates.mutedInterests : updates.mutedInterests.toString().split(",");
+      user.mutedInterests = values.map(normalizeHashtag).filter(Boolean).slice(0, 40);
+    }
+    if (updates.cameraEnabled !== undefined) user.cameraEnabled = Boolean(updates.cameraEnabled);
+    if (updates.micEnabled !== undefined) user.micEnabled = Boolean(updates.micEnabled);
+    if (updates.mutedWords !== undefined) {
+      const values = Array.isArray(updates.mutedWords) ? updates.mutedWords : updates.mutedWords.toString().split(",");
+      user.mutedWords = values.map((value) => textLimit(value, 40).toLowerCase()).filter(Boolean).slice(0, 100);
+    }
+    if (updates.mutedHashtags !== undefined) {
+      const values = Array.isArray(updates.mutedHashtags) ? updates.mutedHashtags : updates.mutedHashtags.toString().split(",");
+      user.algorithmProfile ||= defaultAlgorithmProfile(user);
+      user.algorithmProfile.mutedHashtags = values.map(normalizeHashtag).filter(Boolean).slice(0, 100);
+    }
+    if (updates.allowMessagesFrom !== undefined) {
+      const value = updates.allowMessagesFrom?.toString() || "everyone";
+      user.allowMessagesFrom = messagePrivacyOptions.has(value) ? value : "followers";
+    }
+
+    if (updates.email !== undefined) {
+      const normalizedEmail = updates.email.trim().toLowerCase();
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+      if (!emailRegex.test(normalizedEmail)) {
+        const error = new Error("Enter a valid Gmail or email address.");
+        error.status = 400;
+        throw error;
+      }
+
+      const emailTaken = data.users.some(
+        (item) =>
+          item._id !== user._id &&
+          (item.email?.toLowerCase() === normalizedEmail ||
+            item.pendingEmail?.toLowerCase() === normalizedEmail)
+      );
+
+      if (emailTaken) {
+        const error = new Error("That email is already used by another account.");
+        error.status = 400;
+        throw error;
+      }
+
+      if (normalizedEmail === user.email) {
+        user.pendingEmail = null;
+        user.pendingEmailVerificationCodeHash = null;
+        user.pendingEmailVerificationExpiresAt = null;
+        user.pendingEmailVerificationSentAt = null;
+      } else if (normalizedEmail !== user.pendingEmail) {
+        user.pendingEmail = normalizedEmail;
+        user.pendingEmailVerificationCodeHash = null;
+        user.pendingEmailVerificationExpiresAt = null;
+        user.pendingEmailVerificationSentAt = null;
+      }
+    }
+
+    if (!user.profilePic) user.profilePic = makeLocalAvatar(user.fullName);
+    syncLanguageGroupsForUser(data, user);
+    refreshLanguageGroupCounts(data);
+    user.updatedAt = now();
+
+    return publicUser(user);
+  });
+}
+
+export async function updatePresence(userId, updates = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) return null;
+
+    if (updates.isOnline !== undefined) user.isOnline = Boolean(updates.isOnline);
+    if (updates.inCall !== undefined) user.inCall = Boolean(updates.inCall);
+    user.lastSeen = now();
+    user.updatedAt = now();
+
+    return publicUser(user);
+  });
+}
+
+export async function searchUsersFor(userId, query = "") {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+  const currentUser = data.users.find((user) => user._id === currentId);
+  const q = query.trim().toLowerCase();
+
+  const matches = data.users
+    .filter((user) => user._id !== currentId && user.isOnboarded)
+    .filter(
+      (user) =>
+        !currentUser?.blockedUsers?.includes(user._id) &&
+        !user.blockedUsers?.includes(currentId)
+    )
+    .filter((user) => {
+      if (!q) return true;
+      const fields = [
+        user.fullName,
+        user.username,
+        user.location,
+        user.nativeLanguage,
+        user.learningLanguage,
+        ...(user.learningLanguages || []),
+      ];
+      if (currentUser && staffRoles.has(currentUser.role)) fields.push(user.email);
+      return fields
+        .concat(user.username || "")
+        .filter(Boolean)
+        .some((value) => value.toLowerCase().includes(q));
+    });
+
+  if (!q) {
+    matches.sort(() => Math.random() - 0.5);
+  }
+
+  return matches.map((user) => withRelationship(user, currentId, data));
+}
+
+function withRelationship(user, currentUserId, data) {
+  if (!user) return null;
+  const currentUser = data.users.find((item) => item._id === normalizeId(currentUserId));
+  const publicProfile = sanitizeUserForViewer(publicUser(user), user, currentUser, data);
+  const outgoingFollowRequest = safeArray(data.followRequests).find(
+    (request) =>
+      request.sender === normalizeId(currentUserId) &&
+      request.recipient === user._id &&
+      request.status === "pending"
+  );
+
+  return {
+    ...publicProfile,
+    isFollowing: Boolean(currentUser?.following?.includes(user._id)),
+    followsMe: Boolean(currentUser?.followers?.includes(user._id)),
+    hasPendingFollowRequest: Boolean(outgoingFollowRequest),
+    isBlockedByMe: Boolean(currentUser?.blockedUsers?.includes(user._id)),
+    hasBlockedMe: Boolean(user.blockedUsers?.includes(normalizeId(currentUserId))),
+  };
+}
+
+function requireStaff(data, userId) {
+  const staffUser = data.users.find((user) => user._id === normalizeId(userId));
+
+  if (!staffUser || !staffRoles.has(staffUser.role)) {
+    const error = new Error("Staff access required");
+    error.status = 403;
+    throw error;
+  }
+
+  return staffUser;
+}
+
+function requireAdmin(data, userId) {
+  const adminUser = data.users.find((user) => user._id === normalizeId(userId));
+
+  if (!adminUser || !adminRoles.has(adminUser.role)) {
+    const error = new Error("Admin access required");
+    error.status = 403;
+    throw error;
+  }
+
+  return adminUser;
+}
+
+function canModerateTarget(staffUser, targetUser) {
+  if (!targetUser) return false;
+  if (staffUser._id === targetUser._id) return false;
+  if (staffUser.role === "creator") return true;
+  if (staffUser.role === "admin") return !["creator", "admin"].includes(targetUser.role);
+  return !staffRoles.has(targetUser.role);
+}
+
+function addNotification(data, userId, payload = {}) {
+  if (!userId) return null;
+
+  const createdAt = now();
+  const notification = {
+    _id: crypto.randomUUID(),
+    userId: normalizeId(userId),
+    actorId: payload.actorId ? normalizeId(payload.actorId) : null,
+    type: payload.type || "system",
+    title: payload.title || "Notification",
+    message: payload.message || "",
+    read: false,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  data.notifications.push(notification);
+  return notification;
+}
+
+function summarizeTarget(data, report, viewerId = report?.reporter) {
+  if (!report) return null;
+
+  if (report.targetType === "user") {
+    return withRelationship(data.users.find((user) => user._id === report.targetId), viewerId, data);
+  }
+
+  if (report.targetType === "post") {
+    const post = data.posts.find((item) => item._id === report.targetId);
+    if (!canViewPost(data, viewerId, post)) return null;
+    return hydratePost(post, data, viewerId);
+  }
+
+  if (report.targetType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, report.targetId).comment);
+    const { comment } = post ? findCommentInPost(post, report.targetId) : {};
+    if (!comment || !canViewPost(data, viewerId, post)) return null;
+    if (comment.botHidden && !canViewBotHiddenTarget(data, viewerId, comment.author)) {
+      return {
+        _id: comment._id,
+        postId: post._id,
+        unavailable: true,
+        text: "Comment under review",
+        ...botReviewState(comment),
+      };
+    }
+
+    return {
+      ...comment,
+      postId: post._id,
+      author: withRelationship(data.users.find((user) => user._id === comment.author), viewerId, data),
+      ...botReviewState(comment),
+    };
+  }
+
+  if (report.targetType === "message") {
+    const message = data.messages.find((item) => item._id === report.targetId);
+    if (!message) return null;
+    if (
+      !isStaffViewer(data, viewerId) &&
+      message.sender !== normalizeId(viewerId) &&
+      message.recipient !== normalizeId(viewerId)
+    ) {
+      return null;
+    }
+
+    if (message.botHidden && !canViewBotHiddenTarget(data, viewerId, message.sender)) {
+      return {
+        _id: message._id,
+        unavailable: true,
+        text: "Message under review",
+        sender: withRelationship(data.users.find((user) => user._id === message.sender), viewerId, data),
+        recipient: withRelationship(data.users.find((user) => user._id === message.recipient), viewerId, data),
+        ...botReviewState(message),
+      };
+    }
+
+    return {
+      ...message,
+      sender: withRelationship(data.users.find((user) => user._id === message.sender), viewerId, data),
+      recipient: withRelationship(data.users.find((user) => user._id === message.recipient), viewerId, data),
+      ...botReviewState(message),
+    };
+  }
+
+  if (report.targetType === "bug") {
+    return {
+      _id: report.targetId,
+      type: "bug",
+      label: "User bug report",
+    };
+  }
+
+  return null;
+}
+
+function hydrateReport(report, data, viewerId = report?.reporter) {
+  return {
+    ...report,
+    reporter: publicUser(data.users.find((user) => user._id === report.reporter)),
+    target: summarizeTarget(data, report, viewerId),
+    resolvedBy: report.resolvedBy
+      ? publicUser(data.users.find((user) => user._id === report.resolvedBy))
+      : null,
+  };
+}
+
+function hydrateAppeal(appeal, data) {
+  return {
+    ...appeal,
+    user: publicUser(data.users.find((user) => user._id === appeal.user)),
+    target:
+      appeal.targetType && appeal.targetId
+        ? summarizeTarget(
+            data,
+            {
+              reporter: appeal.user,
+              targetType: appeal.targetType === "account" ? "user" : appeal.targetType,
+              targetId: appeal.targetId,
+            },
+            appeal.user
+          )
+        : null,
+    botAction: appeal.botActionId
+      ? (() => {
+          const action = data.botActions.find((item) => item._id === appeal.botActionId);
+          return action ? hydrateBotAction(action, data) : null;
+        })()
+      : null,
+    resolvedBy: appeal.resolvedBy
+      ? publicUser(data.users.find((user) => user._id === appeal.resolvedBy))
+      : null,
+  };
+}
+
+function hydrateModerationAction(action, data) {
+  return {
+    ...action,
+    staff: publicUser(data.users.find((user) => user._id === action.staff)),
+    targetUser: publicUser(data.users.find((user) => user._id === action.targetUser)),
+  };
+}
+
+export async function followUserFor(senderId, recipientId) {
+  return withData(async (data) => {
+    const sender = data.users.find((user) => user._id === normalizeId(senderId));
+    const recipient = data.users.find((user) => user._id === normalizeId(recipientId));
+
+    if (!sender || !recipient) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (sender._id === recipient._id) {
+      const error = new Error("You cannot follow yourself");
+      error.status = 400;
+      throw error;
+    }
+
+    requireEmailVerified(sender, "follow people");
+
+    sender.following ||= [];
+    recipient.followers ||= [];
+
+    if (sender.following.includes(recipient._id)) {
+      return { status: "following", user: withRelationship(recipient, sender._id, data) };
+    }
+
+    if (recipient.isPrivate) {
+      const existingRequest = safeArray(data.followRequests).find(
+        (request) =>
+          request.sender === sender._id &&
+          request.recipient === recipient._id &&
+          request.status === "pending"
+      );
+
+      if (!existingRequest) {
+        const createdAt = now();
+        data.followRequests.push({
+          _id: crypto.randomUUID(),
+          sender: sender._id,
+          recipient: recipient._id,
+          status: "pending",
+          createdAt,
+          updatedAt: createdAt,
+        });
+        addNotification(data, recipient._id, {
+          actorId: sender._id,
+          type: "follow-request",
+          title: "Follower request",
+          message: `${sender.fullName} wants to follow you.`,
+        });
+      }
+
+      return { status: "requested", user: withRelationship(recipient, sender._id, data) };
+    }
+
+    sender.following.push(recipient._id);
+    recipient.followers.push(sender._id);
+    sender.updatedAt = now();
+    recipient.updatedAt = now();
+    addNotification(data, recipient._id, {
+      actorId: sender._id,
+      type: "follow",
+      title: "New follower",
+      message: `${sender.fullName} started following you.`,
+    });
+
+    const bot = getBotUser(data);
+    const settings = effectiveBotSettings(data);
+    if (bot && recipient._id === bot._id && !sender.isBot) {
+      if (settings.autoFollowBack && !sender.isPrivate) {
+        bot.following ||= [];
+        sender.followers ||= [];
+        if (!bot.following.includes(sender._id)) bot.following.push(sender._id);
+        if (!sender.followers.includes(bot._id)) sender.followers.push(bot._id);
+        bot.updatedAt = now();
+        sender.updatedAt = now();
+        addNotification(data, sender._id, {
+          actorId: bot._id,
+          type: "follow",
+          title: "MEDIA ModBot followed you back",
+          message: "The local assistant followed you back so you can keep chatting.",
+        });
+      }
+
+      if (settings.thankFollowEnabled) {
+        const reply = await generateFollowThanks({
+          actorName: sender.fullName || sender.username,
+          actorId: sender._id,
+          botConfig: botBrainConfig(data),
+        });
+        if (reply) await appendBotMessage(data, sender, reply);
+      }
+
+      createBotAudit(data, {
+        actorId: bot._id,
+        actorType: "bot",
+        action: "bot_follow_social",
+        targetType: "user",
+        targetId: sender._id,
+        reason: "User followed MEDIA ModBot.",
+        result: settings.autoFollowBack && !sender.isPrivate ? "followed_back_and_thanked" : "thanked",
+      });
+    }
+
+    return { status: "following", user: withRelationship(recipient, sender._id, data) };
+  });
+}
+
+export async function unfollowUserFor(senderId, recipientId) {
+  return withData(async (data) => {
+    const sender = data.users.find((user) => user._id === normalizeId(senderId));
+    const recipient = data.users.find((user) => user._id === normalizeId(recipientId));
+
+    if (!sender || !recipient) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    sender.following = (sender.following || []).filter((id) => id !== recipient._id);
+    recipient.followers = (recipient.followers || []).filter((id) => id !== sender._id);
+    data.followRequests = data.followRequests.filter(
+      (request) =>
+        !(
+          request.sender === sender._id &&
+          request.recipient === recipient._id &&
+          request.status === "pending"
+        )
+    );
+    sender.updatedAt = now();
+    recipient.updatedAt = now();
+
+    return { status: "unfollowed", user: withRelationship(recipient, sender._id, data) };
+  });
+}
+
+export async function removeFollowerFor(ownerId, followerId) {
+  return withData(async (data) => {
+    const owner = data.users.find((user) => user._id === normalizeId(ownerId));
+    const follower = data.users.find((user) => user._id === normalizeId(followerId));
+
+    if (!owner || !follower) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    owner.followers = (owner.followers || []).filter((id) => id !== follower._id);
+    follower.following = (follower.following || []).filter((id) => id !== owner._id);
+    owner.updatedAt = now();
+    follower.updatedAt = now();
+
+    return { success: true, user: withRelationship(follower, owner._id, data) };
+  });
+}
+
+export async function blockUserFor(userId, targetUserId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const target = data.users.find((item) => item._id === normalizeId(targetUserId));
+
+    if (!user || !target) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (user._id === target._id) {
+      const error = new Error("You cannot block yourself");
+      error.status = 400;
+      throw error;
+    }
+
+    user.blockedUsers ||= [];
+    if (!user.blockedUsers.includes(target._id)) user.blockedUsers.push(target._id);
+
+    user.following = (user.following || []).filter((id) => id !== target._id);
+    user.followers = (user.followers || []).filter((id) => id !== target._id);
+    target.following = (target.following || []).filter((id) => id !== user._id);
+    target.followers = (target.followers || []).filter((id) => id !== user._id);
+    data.followRequests = data.followRequests.filter(
+      (request) =>
+        !(
+          [user._id, target._id].includes(request.sender) &&
+          [user._id, target._id].includes(request.recipient)
+        )
+    );
+    user.updatedAt = now();
+    target.updatedAt = now();
+
+    return { success: true, user: withRelationship(target, user._id, data) };
+  });
+}
+
+export async function unblockUserFor(userId, targetUserId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const target = data.users.find((item) => item._id === normalizeId(targetUserId));
+
+    if (!user || !target) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    user.blockedUsers = (user.blockedUsers || []).filter((id) => id !== target._id);
+    user.updatedAt = now();
+
+    return { success: true, user: withRelationship(target, user._id, data) };
+  });
+}
+
+export async function getFollowRequestsFor(userId) {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+
+  const incomingFollowReqs = safeArray(data.followRequests)
+    .filter((request) => request.recipient === currentId && request.status === "pending")
+    .map((request) => ({
+      ...request,
+      sender: withRelationship(data.users.find((user) => user._id === request.sender), currentId, data),
+    }));
+
+  const outgoingFollowReqs = safeArray(data.followRequests)
+    .filter((request) => request.sender === currentId && request.status === "pending")
+    .map((request) => ({
+      ...request,
+      recipient: withRelationship(data.users.find((user) => user._id === request.recipient), currentId, data),
+    }));
+
+  return { incomingFollowReqs, outgoingFollowReqs };
+}
+
+export async function resolveFollowRequestFor(userId, requestId, action) {
+  return withData(async (data) => {
+    const request = safeArray(data.followRequests).find((item) => item._id === normalizeId(requestId));
+
+    if (!request) {
+      const error = new Error("Follow request not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (request.recipient !== normalizeId(userId)) {
+      const error = new Error("You are not authorized to manage this request");
+      error.status = 403;
+      throw error;
+    }
+
+    request.status = action === "accept" ? "accepted" : "declined";
+    request.updatedAt = now();
+
+    if (action === "accept") {
+      const sender = data.users.find((user) => user._id === request.sender);
+      const recipient = data.users.find((user) => user._id === request.recipient);
+
+      sender.following ||= [];
+      recipient.followers ||= [];
+
+      if (!sender.following.includes(recipient._id)) sender.following.push(recipient._id);
+      if (!recipient.followers.includes(sender._id)) recipient.followers.push(sender._id);
+      sender.updatedAt = now();
+      recipient.updatedAt = now();
+      addNotification(data, sender._id, {
+        actorId: recipient._id,
+        type: "follow-accepted",
+        title: "Request accepted",
+        message: `${recipient.fullName} accepted your follower request.`,
+      });
+    }
+
+    return { success: true, status: request.status };
+  });
+}
+
+function canViewUserContent(viewerId, author) {
+  if (!author?.isPrivate) return true;
+  if (author._id === normalizeId(viewerId)) return true;
+  return author.followers?.includes(normalizeId(viewerId));
+}
+
+function isStaffViewer(data, viewerId) {
+  const viewer = data.users.find((user) => user._id === normalizeId(viewerId));
+  return Boolean(viewer && staffRoles.has(viewer.role));
+}
+
+function canViewBotHiddenTarget(data, viewerId, ownerId) {
+  const currentId = normalizeId(viewerId);
+  return Boolean(currentId && (currentId === normalizeId(ownerId) || isStaffViewer(data, currentId)));
+}
+
+function botReviewState(target) {
+  const isUnderReview = Boolean(target?.botHidden);
+  return {
+    isUnderReview,
+    botHidden: isUnderReview,
+    botReviewStatus: target?.botReviewStatus || (isUnderReview ? "under_review" : ""),
+    botReviewReason: target?.botReviewReason || "",
+    botReviewActionId: target?.botReviewActionId || null,
+    botReviewedAt: target?.botReviewedAt || null,
+  };
+}
+
+function markBotHiddenTarget(target, action, extra = {}) {
+  if (!target) return false;
+  target.botHidden = true;
+  target.botReviewStatus = "under_review";
+  target.botReviewReason = action.reasonUser || action.reason || "MEDIA ModBot flagged this for review.";
+  target.botReviewActionId = action._id;
+  target.botReviewActionType = action.actionType;
+  target.botReviewedAt = now();
+  Object.assign(target, extra);
+  target.updatedAt = now();
+  return true;
+}
+
+function clearBotHiddenTarget(target, extra = {}) {
+  if (!target) return false;
+  target.botHidden = false;
+  target.botReviewStatus = "";
+  target.botReviewReason = "";
+  target.botReviewActionId = null;
+  target.botReviewActionType = "";
+  target.botReviewedAt = null;
+  Object.assign(target, extra);
+  target.updatedAt = now();
+  return true;
+}
+
+function canViewPost(data, viewerId, post, options = {}) {
+  if (!post) return false;
+  if (post.isDeleted) return false;
+
+  const author = data.users.find((user) => user._id === post.author);
+  if (!author) return false;
+
+  const currentId = normalizeId(viewerId);
+  const viewerIsStaff = isStaffViewer(data, currentId);
+  const allowArchivedForAuthor = options.allowArchivedForAuthor !== false;
+
+  if (
+    !viewerIsStaff &&
+    post.author !== currentId &&
+    (author.fullBannedAt ||
+      isFuture(author.bannedUntil) ||
+      isFuture(author.shadowBannedUntil))
+  ) {
+    return false;
+  }
+
+  if (!viewerIsStaff) {
+    const viewer = data.users.find((user) => user._id === currentId);
+    if (viewer?.blockedUsers?.includes(author._id) || author.blockedUsers?.includes(currentId)) {
+      return false;
+    }
+  }
+
+  if (post.botHidden && post.author !== currentId && !viewerIsStaff) return false;
+
+  if ((post.archived || post.isArchived) && !(allowArchivedForAuthor && post.author === currentId) && !viewerIsStaff) {
+    return false;
+  }
+
+  if (post.visibility === "private" && post.author !== currentId && !viewerIsStaff) return false;
+  if (post.visibility === "followers" && post.author !== currentId && !author.followers?.includes(currentId) && !viewerIsStaff) return false;
+
+  if (!viewerIsStaff && !canViewUserContent(currentId, author)) {
+    return false;
+  }
+
+  return true;
+}
+
+function unavailablePost(original) {
+  return {
+    _id: original?._id || null,
+    unavailable: true,
+    text: "Original post unavailable",
+    language: original?.language || "unknown",
+    media: null,
+    thumbnail: null,
+    song: null,
+    author: null,
+    comments: [],
+    likes: [],
+    likeCount: 0,
+    repostCount: 0,
+    isLiked: false,
+    isReposted: false,
+    archived: Boolean(original?.archived),
+    isDeleted: Boolean(original?.isDeleted),
+    ...botReviewState(original),
+    repostOf: null,
+  };
+}
+
+function hydratePost(post, data, viewerId) {
+  if (!post) return null;
+
+  const author = data.users.find((user) => user._id === post.author);
+  let repostOf = null;
+  if (post.repostOf) {
+    const original = data.posts.find((item) => item._id === post.repostOf);
+    repostOf = canViewPost(data, viewerId, original)
+      ? hydratePost(original, data, viewerId)
+      : unavailablePost(original);
+  }
+
+  return {
+    ...post,
+    author: author ? withRelationship(author, viewerId, data) : null,
+    repostOf,
+    comments: (post.comments || [])
+      .filter((comment) => !comment.deletedAt)
+      .filter((comment) => !comment.botHidden || canViewBotHiddenTarget(data, viewerId, comment.author))
+      .map((comment) => hydrateComment(comment, data, viewerId, post)),
+    isMine: post.author === normalizeId(viewerId),
+    isLiked: post.likes?.includes(normalizeId(viewerId)) || false,
+    likeCount: post.likes?.length || 0,
+    repostCount: data.posts.filter((item) => item.repostOf === post._id).length,
+    isReposted: data.posts.some((item) => item.author === normalizeId(viewerId) && item.repostOf === post._id),
+    ...botReviewState(post),
+  };
+}
+
+function updateHashtagStats(data, post) {
+  const tags = post.hashtags || [];
+  const nowDate = now();
+
+  tags.forEach((tagName) => {
+    const normalizedName = normalizeHashtag(tagName);
+    if (!normalizedName) return;
+
+    let tag = data.hashtags.find((item) => item.normalizedName === normalizedName);
+    if (!tag) {
+      tag = {
+        _id: crypto.randomUUID(),
+        name: normalizedName,
+        normalizedName,
+        postCount: 0,
+        dailyPostCount: 0,
+        weeklyPostCount: 0,
+        trendingScore: 0,
+        category: post.category || "general",
+        language: post.language || "all",
+        blocked: false,
+        lastUsedAt: nowDate,
+        createdAt: nowDate,
+        updatedAt: nowDate,
+      };
+      data.hashtags.push(tag);
+    }
+
+    tag.postCount = data.posts.filter((item) => !item.repostOf && !item.isDeleted && (item.hashtags || []).includes(normalizedName)).length;
+    tag.dailyPostCount += 1;
+    tag.weeklyPostCount += 1;
+    tag.trendingScore = calculateTrendingScore(data, normalizedName);
+    tag.category = post.category || tag.category;
+    tag.language = post.language || tag.language;
+    tag.lastUsedAt = nowDate;
+    tag.updatedAt = nowDate;
+  });
+}
+
+function calculateTrendingScore(data, normalizedName) {
+  const nowMs = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const weekMs = 7 * dayMs;
+  const posts = data.posts.filter((post) => (post.hashtags || []).includes(normalizedName) && !post.isDeleted);
+  const posts24h = posts.filter((post) => nowMs - new Date(post.createdAt).getTime() <= dayMs);
+  const posts7d = posts.filter((post) => nowMs - new Date(post.createdAt).getTime() <= weekMs);
+  const uniqueAuthors24h = new Set(posts24h.map((post) => post.author)).size;
+  const engagement24h = posts24h.reduce(
+    (total, post) => total + (post.likes?.length || 0) + (post.comments?.length || 0) * 3 + (post.saves?.length || 0) * 5,
+    0
+  );
+  const reportPenalty = posts24h.reduce((total, post) => total + (post.reportCount || 0), 0) * 8;
+  const spamPenalty = posts24h.reduce((total, post) => total + (post.spamScore || 0), 0) / 4;
+
+  return posts24h.length * 4 + posts7d.length + uniqueAuthors24h * 3 + engagement24h * 2 - spamPenalty - reportPenalty;
+}
+
+function botActionTypeFromVisionDecision(decision = {}) {
+  const normalized = normalizeBotActionType(decision.recommendedAction || "log");
+  if (["quarantine", "soft_remove"].includes(decision.recommendedAction)) return "hide_content";
+  if (decision.recommendedAction === "admin_review") return "escalate";
+  if (normalized === "allow") return "log";
+  return normalized;
+}
+
+function recordBotImageDecision(data, { post, user, decision, mediaUrl }) {
+  const settings = effectiveBotSettings(data);
+  const bot = getBotUser(data);
+  if (!bot || !post || !user || !decision) return null;
+
+  const createdAt = now();
+  const actionType = botActionTypeFromVisionDecision(decision);
+  const severity = decision.severity || "none";
+  const imageScan = {
+    _id: crypto.randomUUID(),
+    targetType: "post",
+    targetId: post._id,
+    targetUserId: user._id,
+    mediaUrl,
+    captionSnapshot: post.text || "",
+    category: decision.category || "none",
+    severity,
+    confidence: Number(decision.confidence || 0),
+    recommendedAction: actionType,
+    reasonUser: decision.reasonUser || "",
+    reasonStaff: decision.reasonStaff || decision.reason || "",
+    evidenceSummary: decision.evidenceSummary || "",
+    modelUsed: decision.modelUsed || null,
+    fallbackModelUsed: decision.fallbackModelUsed || null,
+    provider: decision.provider || "ollama-vision",
+    ruleVersion: decision.ruleVersion || null,
+    promptVersion: decision.promptVersion || null,
+    createdAt,
+  };
+  data.botImageScans.unshift(imageScan);
+  data.botImageScans.splice(1000);
+
+  if (severity === "none" || actionType === "log") return imageScan;
+
+  const needsReviewActions = new Set(["hide_content", "temp_mute", "restrict", "temp_ban"]);
+  const canAutoApply =
+    settings.allowAutoActions &&
+    (!needsReviewActions.has(actionType) ||
+      (actionType === "hide_content" && settings.autoHideHighConfidence) ||
+      (actionType === "temp_mute" && settings.autoMuteCritical) ||
+      (actionType === "restrict" && env.BOT_CAN_TEMP_RESTRICT) ||
+      (actionType === "temp_ban" && settings.autoTempBanCritical));
+  const action = {
+    _id: crypto.randomUUID(),
+    bot: bot._id,
+    source: "post-image-scan",
+    eventType: "image",
+    targetType: "post",
+    targetId: post._id,
+    targetUser: user._id,
+    actorUser: user._id,
+    actionType,
+    category: decision.category || "media",
+    severity,
+    confidence: Number(decision.confidence || 0),
+    reason: (decision.reasonStaff || decision.reasonUser || "Vision moderation review").slice(0, 600),
+    details: [post.text, mediaUrl].filter(Boolean).join("\n").slice(0, 1600),
+    status: canAutoApply ? "queued" : "needs_review",
+    minutes:
+      actionType === "temp_ban"
+        ? env.BOT_CRITICAL_TEMP_BAN_MINUTES
+        : ["temp_mute", "restrict"].includes(actionType)
+          ? env.BOT_SPAM_MUTE_MINUTES
+          : 0,
+    modelUsed: decision.modelUsed || null,
+    fallbackModelUsed: decision.fallbackModelUsed || null,
+    promptVersion: decision.promptVersion || null,
+    ruleVersion: decision.ruleVersion || null,
+    reasonUser: (decision.reasonUser || decision.reasonStaff || "").slice(0, 600),
+    reasonStaff: (decision.reasonStaff || decision.reasonUser || "").slice(0, 1000),
+    evidenceSummary: (decision.evidenceSummary || "").slice(0, 600),
+    appealAllowed: decision.appealAllowed !== false,
+    restoreEligible: decision.restoreEligible !== false,
+    decision,
+    appliedEffects: [],
+    reversible: ["hide_content", "temp_mute", "restrict", "temp_ban"].includes(actionType),
+    reviewedBy: null,
+    reviewedAt: null,
+    undoneBy: null,
+    undoneAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+  data.botActions.unshift(action);
+  data.botActions.splice(1000);
+  imageScan.botActionId = action._id;
+
+  if (action.status === "queued") {
+    const applied = applyStoredBotAction(data, action, bot);
+    action.status = applied.applied ? "applied" : "needs_review";
+    action.appliedEffects = applied.effects;
+  }
+
+  createBotAudit(data, {
+    actorId: bot._id,
+    actorType: "bot",
+    action: `bot_image_${actionType}`,
+    targetType: "post",
+    targetId: post._id,
+    reason: action.reason,
+    result: action.status,
+    meta: { confidence: action.confidence, severity: action.severity, modelUsed: action.modelUsed },
+  });
+
+  return imageScan;
+}
+
+export async function createPostFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (isAccountBanned(user)) {
+      const ban = getActiveModeration(user).ban;
+      const error = new Error(
+        ban.type === "full"
+          ? `Account fully banned: ${ban.reason}`
+          : `Account banned until ${ban.until}: ${ban.reason}`
+      );
+      error.status = 403;
+      throw error;
+    }
+
+    requireEmailVerified(user, "post");
+    requireNoBotRestriction(user, "post", "post");
+
+    const clientId = textLimit(payload.clientId || "", 120);
+    if (clientId) {
+      const existingPost = data.posts.find(
+        (post) => post.author === user._id && post.clientId === clientId
+      );
+      if (existingPost) return hydratePost(existingPost, data, user._id);
+    }
+
+    const text = (payload.text || payload.content || payload.caption || "").trim().slice(0, env.MAX_POST_LENGTH);
+    const classification = classifyPostText(text, {
+      category: payload.category,
+      hashtags: payload.hashtags,
+      fallbackLanguage: payload.language || user.learningLanguage || user.nativeLanguage || "english",
+    });
+    const language = (payload.language || classification.language || user.learningLanguage || user.nativeLanguage || "english")
+      .trim()
+      .toLowerCase();
+    const requestedMediaItems =
+      Array.isArray(payload.mediaItems) && payload.mediaItems.length > 0
+        ? payload.mediaItems.slice(0, 10)
+        : payload.mediaDataUrl
+          ? [
+              {
+                dataUrl: payload.mediaDataUrl,
+                name: payload.mediaName || "post-media",
+              },
+            ]
+          : [];
+    const savedMediaItems = [];
+    const imageScanInputs = [];
+
+    for (const [index, item] of requestedMediaItems.entries()) {
+      const dataUrl =
+        typeof item === "string"
+          ? item
+          : item?.dataUrl || item?.mediaDataUrl || item?.preview || "";
+      const fallbackName =
+        typeof item === "object" && item?.name
+          ? item.name
+          : payload.mediaName || `post-media-${index + 1}`;
+      const savedMedia = await saveDataUrlMedia(dataUrl, fallbackName);
+
+      if (savedMedia && ["image", "video"].includes(savedMedia.kind)) {
+        savedMediaItems.push({
+          ...savedMedia,
+          order: savedMediaItems.length,
+        });
+        if (["image", "video"].includes(savedMedia.kind) && /^data:(image|video)\//.test(dataUrl || "")) {
+          imageScanInputs.push({ dataUrl, mediaUrl: savedMedia.url });
+        }
+      }
+    }
+
+    const media = savedMediaItems[0] || null;
+    const thumbnail = payload.thumbnailDataUrl
+      ? await saveDataUrlMedia(payload.thumbnailDataUrl, payload.thumbnailName || "post-thumbnail")
+      : null;
+    const validPostMedia = savedMediaItems.length > 0;
+
+    if (!text && !validPostMedia) {
+      const error = new Error("Post needs text, a photo, or a video.");
+      error.status = 400;
+      throw error;
+    }
+
+    const song = payload.song ? sanitizeSongAttachment(payload.song) : null;
+
+    const createdAt = now();
+    const post = {
+      _id: crypto.randomUUID(),
+      clientId: clientId || null,
+      author: user._id,
+      text,
+      content: text,
+      caption: text,
+      language,
+      targetLanguages: Array.isArray(payload.targetLanguages)
+        ? payload.targetLanguages.map(languageValue).filter(Boolean).slice(0, 8)
+        : [],
+      media,
+      mediaItems: savedMediaItems,
+      mediaType: media?.mimeType?.split("/")[0] || media?.kind || "text",
+      thumbnail: thumbnail?.url || media?.url || null,
+      song,
+      audioLabel: song ? "" : savedMediaItems.some((item) => item.kind === "video") ? "Original audio" : "",
+      status: "posted",
+      archived: false,
+      isArchived: false,
+      isDeleted: false,
+      pinnedAt: null,
+      pinnedBy: null,
+      visibility: ["public", "followers", "private"].includes(payload.visibility) ? payload.visibility : "public",
+      hashtags: classification.hashtags,
+      detectedTags: classification.detectedTags,
+      finalTags: classification.finalTags,
+      category: classification.category,
+      subcategory: classification.subcategory,
+      tone: classification.tone,
+      repostOf: null,
+      likes: [],
+      dislikes: [],
+      saves: [],
+      views: [],
+      hiddenBy: [],
+      comments: [],
+      reportCount: 0,
+      likeCount: 0,
+      dislikeCount: 0,
+      commentCount: 0,
+      saveCount: 0,
+      repostCount: 0,
+      viewCount: 0,
+      qualityScore: classification.qualityScore,
+      spamScore: classification.spamScore,
+      hotScore: 0,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.posts.push(post);
+    updateHashtagStats(data, post);
+    refreshLanguageGroupCounts(data);
+    const bot = getBotUser(data);
+    if (bot && effectiveBotSettings(data).scanImages && imageScanInputs.length > 0) {
+      for (const scanInput of imageScanInputs.slice(0, 4)) {
+        const decision = await moderateImageContent({
+          imageDataUrl: scanInput.dataUrl,
+          caption: text,
+          context: {
+            source: "post-create",
+            targetType: "post",
+            targetId: post._id,
+            userId: user._id,
+          },
+        });
+        recordBotImageDecision(data, {
+          post,
+          user,
+          decision,
+          mediaUrl: scanInput.mediaUrl,
+        });
+      }
+    }
+    const moderationConcern = detectModerationConcern(text);
+    if (moderationConcern) {
+      addNotification(data, user._id, {
+        actorId: bot?._id || null,
+        type: "warning",
+        title: "Post moderation notice",
+        message: "MEDIA ModBot noticed language that may need review. Please keep posts safe and respectful.",
+      });
+    }
+
+    if (bot && textMentionsBot(text, bot)) {
+      const replyText = await generateBotReply({
+        text,
+        userName: user.fullName,
+        userId: user._id,
+        botConfig: botBrainConfig(data),
+        context: { source: "post", mentionedBot: true, targetType: "post", targetId: post._id },
+      });
+      post.comments.push({
+        _id: crypto.randomUUID(),
+        author: bot._id,
+        text: replyText,
+        likes: [],
+        replies: [],
+        pinnedAt: null,
+        pinnedBy: null,
+        reportCount: 0,
+        editedAt: null,
+        editHistory: [],
+        deletedAt: null,
+        createdAt,
+        updatedAt: createdAt,
+      });
+    }
+
+    maybeBotRepost(data, post, user);
+    if (!textMentionsBot(text, bot)) {
+      await maybeBotSocialComment(data, post, user);
+    }
+    return hydratePost(post, data, user._id);
+  });
+}
+
+export async function getFeedFor(userId) {
+  const data = await readData();
+  const viewer = data.users.find((user) => user._id === normalizeId(userId));
+  if (!viewer) return [];
+
+  const followedIds = new Set(viewer.following || []);
+  const preferredLanguages = new Set(
+    [viewer.learningLanguage, viewer.nativeLanguage].filter(Boolean).map((lang) => lang.toLowerCase())
+  );
+
+  return data.posts
+    .filter((post) => !post.repostOf)
+    .filter((post) => {
+      const author = data.users.find((user) => user._id === post.author);
+      if (viewer.blockedUsers?.includes(author?._id) || author?.blockedUsers?.includes(viewer._id)) return false;
+      if (author?._id !== viewer._id && isFuture(author?.shadowBannedUntil)) return false;
+      if (post.removedFromFeed) return false;
+      if ((post.hashtags || []).some((tag) => data.blockedHashtags?.includes(tag))) return false;
+      return !post.archived && canViewPost(data, viewer._id, post, { allowArchivedForAuthor: false });
+    })
+    .map((post) => {
+      const ageHours = Math.max(1, (Date.now() - new Date(post.createdAt).getTime()) / 3600000);
+      const languageScore = preferredLanguages.has(post.language) ? 40 : 0;
+      const followScore = followedIds.has(post.author) ? 25 : 0;
+      const commentScore = (post.comments?.length || 0) * 4;
+      const engagementScore = (post.likes?.length || 0) * 3 + data.posts.filter((item) => item.repostOf === post._id).length * 5 + commentScore;
+      const recencyScore = Math.max(0, 36 - ageHours);
+      const authorTrustScore = (data.users.find((user) => user._id === post.author)?.moderationRecords?.length || 0) === 0 ? 8 : -25;
+
+      return {
+        post,
+        score: languageScore + followScore + engagementScore + recencyScore + authorTrustScore,
+      };
+    })
+    .sort((a, b) => b.score - a.score || new Date(b.post.createdAt) - new Date(a.post.createdAt))
+    .map(({ post }) => hydratePost(post, data, viewer._id));
+}
+
+function mutedByUser(user, post, author) {
+  const text = `${post.text || ""} ${(post.hashtags || []).join(" ")}`.toLowerCase();
+  if (user.mutedUsers?.includes(author?._id)) return true;
+  if ((user.mutedWords || []).some((word) => word && text.includes(word.toLowerCase()))) return true;
+  const mutedHashtags = new Set(user.algorithmProfile?.mutedHashtags || []);
+  if ((post.hashtags || []).some((tag) => mutedHashtags.has(tag))) return true;
+  return false;
+}
+
+function candidatePostsForUser(data, viewer, mode = "for_you") {
+  return data.posts
+    .filter((post) => !post.repostOf && !post.isDeleted)
+    .filter((post) => {
+      const author = data.users.find((user) => user._id === post.author);
+      if (!author) return false;
+      if (post.hiddenBy?.includes(viewer._id) || viewer.algorithmProfile?.hiddenPosts?.includes(post._id)) return false;
+      if (mutedByUser(viewer, post, author)) return false;
+      if (post.removedFromFeed) return false;
+      if ((post.hashtags || []).some((tag) => data.blockedHashtags?.includes(tag))) return false;
+      if (author.fullBannedAt || isFuture(author.bannedUntil)) return false;
+      if (author._id !== viewer._id && isFuture(author.shadowBannedUntil)) return false;
+      if ((post.reportCount || 0) >= 8 || (post.spamScore || 0) >= 75) return false;
+      if (!canViewPost(data, viewer._id, post, { allowArchivedForAuthor: false })) return false;
+      if (mode === "following") return viewer.following?.includes(post.author) || viewer.friends?.includes(post.author);
+      if (mode === "language") {
+        const languages = new Set(
+          [viewer.learningLanguage, viewer.nativeLanguage, ...(viewer.learningLanguages || [])]
+            .filter(Boolean)
+            .map((item) => item.toLowerCase())
+        );
+        return languages.has(post.language) || languages.has(author.nativeLanguage) || languages.has(author.learningLanguage);
+      }
+      if (mode === "trending") return calculatePostHotScore(post) > 10;
+      return true;
+    });
+}
+
+function calculatePostHotScore(post) {
+  const engagement =
+    (post.likes?.length || 0) +
+    (post.comments?.length || 0) * 3 +
+    (post.saves?.length || 0) * 5 +
+    (post.repostCount || 0) * 5 +
+    (post.viewCount || 0) * 0.2 -
+    (post.dislikes?.length || 0) * 2 -
+    (post.reportCount || 0) * 15;
+  const ageHours = Math.max(1, (Date.now() - new Date(post.createdAt).getTime()) / 3600000);
+  return engagement / Math.pow(ageHours, 0.7);
+}
+
+export async function getSmartFeedFor(userId, mode = "for_you", query = {}) {
+  const data = await readData();
+  const viewer = data.users.find((user) => user._id === normalizeId(userId));
+  if (!viewer) return { posts: [], page: 1, limit: env.DEFAULT_FEED_LIMIT, total: 0, hasMore: false };
+
+  const followedIds = new Set(viewer.following || []);
+  const seenPostIds = new Set(
+    data.algorithmEvents
+      .filter((event) => event.user === viewer._id && ["view", "long_view", "hide", "not_interested"].includes(event.eventType))
+      .map((event) => event.post)
+  );
+
+  let scored = candidatePostsForUser(data, viewer, mode)
+    .slice(-env.MAX_CANDIDATE_POSTS)
+    .map((post, index) => {
+      const author = data.users.find((user) => user._id === post.author);
+      const score = mode === "chronological"
+        ? new Date(post.createdAt).getTime()
+        : scorePostForUser({ post, author, user: viewer, followedIds, seenPostIds, rankIndex: index });
+      return { post, score };
+    });
+
+  if (mode === "discover") {
+    scored = scored.filter(({ post }) => !followedIds.has(post.author));
+  }
+
+  const paged = paginate(
+    scored
+      .sort((a, b) => b.score - a.score || new Date(b.post.createdAt) - new Date(a.post.createdAt))
+      .map(({ post }) => hydratePost(post, data, viewer._id)),
+    query.page,
+    query.limit
+  );
+
+  return {
+    posts: paged.items,
+    page: paged.page,
+    limit: paged.limit,
+    total: paged.total,
+    hasMore: paged.hasMore,
+    mode,
+  };
+}
+
+export async function getPostsForProfile(viewerId, profileId) {
+  const data = await readData();
+  const viewer = data.users.find((user) => user._id === normalizeId(viewerId));
+  const profile = data.users.find((user) => user._id === normalizeId(profileId));
+  if (viewer?.blockedUsers?.includes(profile?._id) || profile?.blockedUsers?.includes(viewer?._id)) return [];
+  if (!profile || (!isStaffViewer(data, viewerId) && !canViewUserContent(viewerId, profile))) return [];
+
+  return data.posts
+    .filter((post) => post.author === profile._id)
+    .filter((post) => !post.isDeleted)
+    .filter((post) => canViewPost(data, viewerId, post))
+    .sort((a, b) => {
+      const pinnedDelta = new Date(b.pinnedAt || 0) - new Date(a.pinnedAt || 0);
+      if (pinnedDelta !== 0) return pinnedDelta;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    })
+    .map((post) => hydratePost(post, data, viewerId));
+}
+
+export async function archivePostFor(userId, postId) {
+  return withData(async (data) => {
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!post || post.author !== normalizeId(userId)) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    post.archived = !post.archived;
+    post.isArchived = post.archived;
+    if (post.archived) {
+      post.pinnedAt = null;
+      post.pinnedBy = null;
+    }
+    post.updatedAt = now();
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function togglePostPinFor(userId, postId) {
+  return withData(async (data) => {
+    const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+
+    if (!currentUser || !post || post.author !== currentUser._id || post.repostOf || post.isDeleted) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (post.pinnedAt) {
+      post.pinnedAt = null;
+      post.pinnedBy = null;
+      post.updatedAt = now();
+      return hydratePost(post, data, userId);
+    }
+
+    const pinnedPosts = data.posts.filter(
+      (item) =>
+        item.author === currentUser._id &&
+        !item.repostOf &&
+        !item.isDeleted &&
+        item.pinnedAt
+    );
+
+    if (pinnedPosts.length >= 3) {
+      const error = new Error("You can pin up to 3 posts on your profile.");
+      error.status = 400;
+      error.code = "PIN_LIMIT";
+      throw error;
+    }
+
+    post.pinnedAt = now();
+    post.pinnedBy = currentUser._id;
+    post.updatedAt = post.pinnedAt;
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function deletePostFor(userId, postId) {
+  return withData(async (data) => {
+    const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+
+    if (!currentUser || !post) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const canDelete = post.author === currentUser._id || staffRoles.has(currentUser.role);
+    if (!canDelete) {
+      const error = new Error("You cannot delete this post");
+      error.status = 403;
+      throw error;
+    }
+
+    if (post.repostOf) {
+      data.posts = data.posts.filter((item) => item._id !== post._id);
+      const original = data.posts.find((item) => item._id === post.repostOf);
+      if (original) {
+        original.repostCount = data.posts.filter((item) => item.repostOf === original._id).length;
+        original.updatedAt = now();
+      }
+
+      return { success: true, deletedIds: [post._id], removedRepost: true };
+    }
+
+    const deletedAt = now();
+    post.text = "";
+    post.content = "";
+    post.caption = "";
+    post.media = null;
+    post.thumbnail = null;
+    post.visibility = "private";
+    post.archived = true;
+    post.isArchived = true;
+    post.isDeleted = true;
+    post.deletedAt = deletedAt;
+    post.pinnedAt = null;
+    post.pinnedBy = null;
+    post.likes = [];
+    post.dislikes = [];
+    post.saves = [];
+    post.comments = [];
+    post.commentCount = 0;
+    post.likeCount = 0;
+    post.dislikeCount = 0;
+    post.saveCount = 0;
+    post.viewCount = 0;
+    post.updatedAt = deletedAt;
+
+    data.reports.forEach((report) => {
+      if (report.targetType === "post" && report.targetId === post._id && report.status === "open") {
+        report.status = "resolved";
+        report.resolution = "Post was deleted.";
+        report.resolvedBy = currentUser._id;
+        report.updatedAt = deletedAt;
+      }
+    });
+
+    return { success: true, deletedIds: [post._id], softDeleted: true };
+  });
+}
+
+export async function repostFor(userId, postId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const original = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!user || !original || original.archived || !canViewPost(data, user._id, original)) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(user, "repost");
+
+    const existing = data.posts.find((post) => post.author === user._id && post.repostOf === original._id);
+    if (existing) {
+      data.posts = data.posts.filter((post) => post._id !== existing._id);
+      original.repostCount = data.posts.filter((post) => post.repostOf === original._id).length;
+      return { success: true, removed: true, postId: original._id };
+    }
+
+    const createdAt = now();
+    const repost = {
+      _id: crypto.randomUUID(),
+      author: user._id,
+      text: "",
+      language: original.language,
+      media: null,
+      thumbnail: original.thumbnail || original.media?.url || null,
+      archived: false,
+      pinnedAt: null,
+      pinnedBy: null,
+      repostOf: original._id,
+      likes: [],
+      comments: [],
+      reportCount: 0,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.posts.push(repost);
+    original.repostCount = data.posts.filter((item) => item.repostOf === original._id).length;
+    if (original.author !== user._id) {
+      addNotification(data, original.author, {
+        actorId: user._id,
+        type: "repost",
+        title: "New repost",
+        message: `${user.fullName} reposted your post.`,
+      });
+    }
+    return hydratePost(repost, data, user._id);
+  });
+}
+
+export async function toggleLikeFor(userId, postId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!user || !post || !canViewPost(data, user._id, post)) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(user, "like posts");
+
+    post.likes ||= [];
+    const isRemoving = post.likes.includes(normalizeId(userId));
+    if (post.likes.includes(normalizeId(userId))) {
+      post.likes = post.likes.filter((id) => id !== normalizeId(userId));
+    } else {
+      post.likes.push(normalizeId(userId));
+    }
+    post.likeCount = post.likes.length;
+    post.updatedAt = now();
+
+    if (!isRemoving && post.author !== user._id) {
+      addNotification(data, post.author, {
+        actorId: user._id,
+        type: "like",
+        title: "New like",
+        message: `${user.fullName} liked your post.`,
+      });
+    }
+
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function addCommentFor(userId, postId, text = "", parentCommentId = null, gif = null, clientIdValue = "") {
+  return withData(async (data) => {
+    const author = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const postAuthor = data.users.find((user) => user._id === post?.author);
+
+    if (!author || !post || !postAuthor || !canViewPost(data, author._id, post)) {
+      const error = new Error("Post not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(author, "comment");
+    requireNoBotRestriction(author, "comment", "comment");
+
+    const clientId = textLimit(clientIdValue || "", 120);
+    if (clientId) {
+      const exists = findCommentByClientId(post.comments || [], author._id, clientId);
+      if (exists) return hydratePost(post, data, userId);
+    }
+
+    if (isAccountBanned(author) || isFuture(author.messageBanUntil)) {
+      const ban = getActiveModeration(author).ban;
+      const reason = author.messageBanReason || author.banReason || "Commenting restricted";
+      const until = author.messageBanUntil || ban?.until || "admin review clears this restriction";
+      const error = new Error(`You cannot comment until ${until}: ${ban?.reason || reason}`);
+      error.status = 403;
+      throw error;
+    }
+
+    const body = text.trim();
+    const gifPayload = gif?.url
+      ? {
+          url: gif.url,
+          title: gif.title || "GIF",
+          source: gif.source || "gif",
+          type: gif.type || "gif",
+        }
+      : null;
+
+    if (!body && !gifPayload) {
+      const error = new Error("Comment cannot be empty");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    post.comments ||= [];
+    const parentComment = parentCommentId
+      ? findCommentInPost(post, parentCommentId).comment
+      : null;
+
+    if (parentCommentId && !parentComment) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const parentDepth = Number(parentComment?.depth) || 0;
+    const comment = {
+      _id: crypto.randomUUID(),
+      clientId: clientId || null,
+      status: "sent",
+      author: author._id,
+      text: body.slice(0, 800),
+      parentId: parentComment?._id || null,
+      rootId: parentComment ? parentComment.rootId || parentComment._id : null,
+      depth: parentComment ? parentDepth + 1 : 0,
+      language: languageValue(post.language || author.learningLanguage || author.nativeLanguage || "english"),
+      hashtags: classifyPostText(body, { fallbackLanguage: post.language }).hashtags,
+      detectedTags: classifyPostText(body, { fallbackLanguage: post.language }).detectedTags,
+      replies: [],
+      gif: gifPayload,
+      pinnedAt: null,
+      pinnedBy: null,
+      likes: [],
+      reportCount: 0,
+      likeCount: 0,
+      replyCount: 0,
+      createdAt,
+      updatedAt: createdAt,
+      editedAt: null,
+      editHistory: [],
+      deletedAt: null,
+    };
+
+    if (parentComment) {
+      parentComment.replies ||= [];
+      comment.rootId = parentComment.rootId || parentComment._id;
+      parentComment.replies.push(comment);
+      parentComment.replyCount = countCommentTree(parentComment.replies);
+      parentComment.updatedAt = createdAt;
+    } else {
+      comment.rootId = comment._id;
+      post.comments.push(comment);
+    }
+    post.commentCount = countCommentTree(post.comments);
+    post.updatedAt = createdAt;
+
+    const bot = getBotUser(data);
+    const moderationConcern = detectModerationConcern(body);
+    if (moderationConcern) {
+      addNotification(data, author._id, {
+        actorId: bot?._id || null,
+        type: "warning",
+        title: "Comment moderation notice",
+        message: "MEDIA ModBot noticed language that may need review. Please keep comments safe and respectful.",
+      });
+    }
+
+    if (bot && !author.isBot && textMentionsBot(body, bot)) {
+      const botText = await generateBotReply({
+        text: body,
+        userName: author.fullName,
+        userId: author._id,
+        botConfig: botBrainConfig(data),
+        context: { source: "comment", mentionedBot: true, targetType: "comment", targetId: comment._id },
+      });
+      const botComment = {
+        _id: crypto.randomUUID(),
+        author: bot._id,
+        text: botText,
+        parentId: parentComment ? parentComment._id : comment._id,
+        rootId: parentComment ? parentComment.rootId || parentComment._id : comment.rootId || comment._id,
+        depth: parentComment ? (Number(parentComment.depth) || 0) + 1 : 1,
+        replies: [],
+        likes: [],
+        pinnedAt: null,
+        pinnedBy: null,
+        reportCount: 0,
+        likeCount: 0,
+        replyCount: 0,
+        createdAt: now(),
+        updatedAt: now(),
+        editedAt: null,
+        editHistory: [],
+        deletedAt: null,
+      };
+      if (parentComment) {
+        parentComment.replies.push(botComment);
+        parentComment.replyCount = countCommentTree(parentComment.replies);
+      } else {
+        comment.replies.push(botComment);
+        comment.replyCount = countCommentTree(comment.replies);
+      }
+      post.commentCount = countCommentTree(post.comments);
+    }
+
+    if (parentComment && parentComment.author !== author._id) {
+      const parentAuthor = data.users.find((user) => user._id === parentComment.author);
+      addNotification(data, parentComment.author, {
+        actorId: author._id,
+        type: "comment-reply",
+        title: "New reply",
+        message: `${author.fullName} replied to ${parentAuthor?.fullName || "your"} comment.`,
+      });
+    } else if (post.author !== author._id) {
+      addNotification(data, post.author, {
+        actorId: author._id,
+        type: "comment",
+        title: "New comment",
+        message: `${author.fullName} commented on your post.`,
+      });
+    }
+
+    return hydratePost(post, data, userId);
+  });
+}
+
+function findCommentInPost(post, commentId) {
+  const targetId = normalizeId(commentId);
+  const visit = (comments = [], parent = null, root = null) => {
+    for (const comment of comments) {
+      const currentRoot = root || comment;
+      if (comment._id === targetId) return { comment, parent, root: currentRoot };
+      const found = visit(comment.replies || [], comment, currentRoot);
+      if (found.comment) return found;
+    }
+    return { comment: null, parent: null, root: null };
+  };
+  return visit(post.comments || []);
+}
+
+function findCommentByClientId(comments = [], authorId, clientId) {
+  for (const comment of comments) {
+    if (comment.author === authorId && comment.clientId === clientId) return comment;
+    const found = findCommentByClientId(comment.replies || [], authorId, clientId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function refreshCommentReplyCounts(comments = []) {
+  comments.forEach((comment) => {
+    comment.replies ||= [];
+    refreshCommentReplyCounts(comment.replies);
+    comment.replyCount = countCommentTree(comment.replies);
+  });
+}
+
+function removeCommentFromTree(comments = [], commentId) {
+  const targetId = normalizeId(commentId);
+  const index = comments.findIndex((comment) => comment._id === targetId);
+
+  if (index >= 0) {
+    const [removed] = comments.splice(index, 1);
+    return { removed };
+  }
+
+  for (const comment of comments) {
+    const result = removeCommentFromTree(comment.replies || [], targetId);
+    if (result.removed) return result;
+  }
+
+  return { removed: null };
+}
+
+function countPinnedComments(comments = []) {
+  return comments.reduce(
+    (total, comment) =>
+      comment.deletedAt
+        ? total
+        : total +
+          (comment.pinnedAt ? 1 : 0) +
+          countPinnedComments(comment.replies || []),
+    0
+  );
+}
+
+function hydrateComment(comment, data, viewerId, owningPost = null) {
+  const post =
+    owningPost ||
+    data.posts.find((item) => findCommentInPost(item, comment._id).comment) ||
+    null;
+  const parentPost = comment.parentId
+    ? data.posts.find((post) => findCommentInPost(post, comment.parentId).comment)
+    : null;
+  const parent = parentPost ? findCommentInPost(parentPost, comment.parentId).comment : null;
+  const postAuthorId = post?.author || null;
+  const creatorLiked = postAuthorId ? comment.likes?.includes(postAuthorId) || false : false;
+  const canSeeHiddenReplies = (reply) =>
+    !reply.botHidden || canViewBotHiddenTarget(data, viewerId, reply.author);
+
+  return {
+    ...comment,
+    author: withRelationship(data.users.find((user) => user._id === comment.author), viewerId, data),
+    parentAuthor: parent
+      ? withRelationship(data.users.find((user) => user._id === parent.author), viewerId, data)
+      : null,
+    isLiked: comment.likes?.includes(normalizeId(viewerId)) || false,
+    likeCount: comment.likes?.length || 0,
+    creatorLiked,
+    pinnedByCreator: Boolean(comment.pinnedAt && comment.pinnedBy === postAuthorId),
+    canBePinnedByViewer: Boolean(postAuthorId && postAuthorId === normalizeId(viewerId)),
+    replyCount: countCommentTree(comment.replies || []),
+    ...botReviewState(comment),
+    replies: (comment.replies || [])
+      .filter((reply) => !reply.deletedAt)
+      .filter(canSeeHiddenReplies)
+      .map((reply) => hydrateComment(reply, data, viewerId, post)),
+  };
+}
+
+export async function getPostCommentsFor(userId, postId) {
+  const data = await readData();
+  const post = data.posts.find((item) => item._id === normalizeId(postId));
+  if (!post || !canViewPost(data, userId, post)) {
+    const error = new Error("Post not found");
+    error.status = 404;
+    throw error;
+  }
+  return (post.comments || [])
+    .filter((comment) => !comment.deletedAt)
+    .filter((comment) => !comment.botHidden || canViewBotHiddenTarget(data, userId, comment.author))
+    .map((comment) => hydrateComment(comment, data, userId, post));
+}
+
+export async function editCommentFor(userId, postId, commentId, text = "") {
+  return withData(async (data) => {
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const { comment } = post ? findCommentInPost(post, commentId) : {};
+
+    if (!post || !comment || comment.author !== normalizeId(userId) || comment.deletedAt) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const body = text.trim();
+    if (!body) {
+      const error = new Error("Comment cannot be empty");
+      error.status = 400;
+      throw error;
+    }
+
+    const editedAt = now();
+    const previousText = comment.text || "";
+    const nextText = body.slice(0, 800);
+    comment.editHistory ||= [];
+    comment.editHistory.push({
+      previousText,
+      nextText,
+      editedBy: normalizeId(userId),
+      editedAt,
+    });
+    comment.text = nextText;
+    comment.editedAt = editedAt;
+    comment.updatedAt = comment.editedAt;
+    post.updatedAt = comment.editedAt;
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function deleteCommentFor(userId, postId, commentId) {
+  return withData(async (data) => {
+    const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const { comment } = post ? findCommentInPost(post, commentId) : {};
+
+    if (!currentUser || !post || !comment) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const canDelete = comment.author === currentUser._id || post.author === currentUser._id || staffRoles.has(currentUser.role);
+    if (!canDelete) {
+      const error = new Error("You can only delete your own comments.");
+      error.status = 403;
+      throw error;
+    }
+
+    const removed = removeCommentFromTree(post.comments || [], commentId).removed;
+    if (!removed) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    refreshCommentReplyCounts(post.comments || []);
+    post.commentCount = countCommentTree(post.comments || []);
+    post.updatedAt = now();
+    data.reports.forEach((report) => {
+      if (report.targetType === "comment" && report.targetId === removed._id && report.status === "open") {
+        report.status = "resolved";
+        report.resolution = "Comment was removed.";
+        report.resolvedBy = currentUser._id;
+        report.updatedAt = post.updatedAt;
+      }
+    });
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function toggleCommentPinFor(userId, postId, commentId) {
+  return withData(async (data) => {
+    const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const { comment } = post ? findCommentInPost(post, commentId) : {};
+
+    if (!currentUser || !post || !comment || comment.deletedAt || !canViewPost(data, currentUser._id, post)) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const canPin = post.author === currentUser._id || staffRoles.has(currentUser.role);
+    if (!canPin) {
+      const error = new Error("Only the post creator can pin comments.");
+      error.status = 403;
+      throw error;
+    }
+
+    if (comment.pinnedAt) {
+      comment.pinnedAt = null;
+      comment.pinnedBy = null;
+      comment.updatedAt = now();
+      post.updatedAt = comment.updatedAt;
+      return hydratePost(post, data, userId);
+    }
+
+    const pinnedCount = countPinnedComments(post.comments || []);
+    if (pinnedCount >= 3) {
+      const error = new Error("You can pin up to 3 comments on a post.");
+      error.status = 400;
+      error.code = "COMMENT_PIN_LIMIT";
+      throw error;
+    }
+
+    comment.pinnedAt = now();
+    comment.pinnedBy = currentUser._id;
+    comment.updatedAt = comment.pinnedAt;
+    post.updatedAt = comment.pinnedAt;
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function toggleCommentLikeFor(userId, postId, commentId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const { comment } = post ? findCommentInPost(post, commentId) : {};
+
+    if (!user || !post || !comment || comment.deletedAt || !canViewPost(data, user._id, post)) {
+      const error = new Error("Comment not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(user, "like comments");
+
+    comment.likes ||= [];
+    const isRemoving = comment.likes.includes(user._id);
+    if (isRemoving) {
+      comment.likes = comment.likes.filter((id) => id !== user._id);
+    } else {
+      comment.likes.push(user._id);
+    }
+    comment.likeCount = comment.likes.length;
+    comment.updatedAt = now();
+    post.updatedAt = comment.updatedAt;
+
+    if (!isRemoving && comment.author !== user._id) {
+      const isPostCreator = user._id === post.author;
+      addNotification(data, comment.author, {
+        actorId: user._id,
+        type: "comment-like",
+        title: isPostCreator ? "Creator liked your comment" : "New comment like",
+        message: `${user.fullName}${isPostCreator ? " (creator)" : ""} liked your comment.`,
+      });
+    }
+    return hydratePost(post, data, userId);
+  });
+}
+
+function interestDeltaForEvent(eventType, dwellTimeMs = 0) {
+  if (eventType === "view") {
+    if (dwellTimeMs > 15000) return 3;
+    if (dwellTimeMs > 5000) return 1;
+    if (dwellTimeMs < 2000) return -0.2;
+    return 0.2;
+  }
+  const map = {
+    long_view: 3,
+    like: 4,
+    dislike: -6,
+    comment: 7,
+    save: 10,
+    repost: 12,
+    share: 10,
+    hide: -12,
+    report: -20,
+    follow_author: 12,
+    open_hashtag: 4,
+    click_profile: 5,
+    not_interested: -12,
+  };
+  return map[eventType] || 0;
+}
+
+function applyInterestDelta(user, post, eventType, dwellTimeMs = 0) {
+  user.algorithmProfile ||= defaultAlgorithmProfile(user);
+  user.algorithmProfile.interestWeights ||= {};
+  user.algorithmProfile.negativeInterestWeights ||= {};
+
+  const delta = interestDeltaForEvent(eventType, dwellTimeMs);
+  const tags = post?.finalTags?.length ? post.finalTags : post?.hashtags || [];
+
+  tags.forEach((tag) => {
+    if (delta >= 0) {
+      user.algorithmProfile.interestWeights[tag] = Math.max(
+        -100,
+        Math.min(250, (Number(user.algorithmProfile.interestWeights[tag]) || 0) + delta)
+      );
+    } else {
+      user.algorithmProfile.negativeInterestWeights[tag] = Math.max(
+        0,
+        Math.min(250, (Number(user.algorithmProfile.negativeInterestWeights[tag]) || 0) + Math.abs(delta))
+      );
+    }
+  });
+
+  user.algorithmProfile.lastUpdatedAt = now();
+}
+
+export async function getAlgorithmProfileFor(userId) {
+  const user = await getUserById(userId);
+  return user?.algorithmProfile || defaultAlgorithmProfile(user);
+}
+
+export async function getInterestOptionsFor() {
+  return INTEREST_OPTIONS.map((id) => ({
+    id,
+    label: id
+      .split("_")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" "),
+  }));
+}
+
+function hydrateLanguageGroup(group, data, viewerId, { includeMembers = false } = {}) {
+  const members = includeMembers
+    ? (group.memberIds || [])
+        .map((id) => data.users.find((user) => user._id === id))
+        .filter((user) => user?.isOnboarded)
+        .map((user) => withRelationship(user, viewerId, data))
+        .filter(Boolean)
+    : undefined;
+
+  return {
+    ...group,
+    id: group.id || group._id || group.slug,
+    memberCount: (group.memberIds || []).length,
+    members,
+    isMember: Boolean(group.memberIds?.includes(normalizeId(viewerId))),
+  };
+}
+
+export async function getLanguageGroupsFor(userId) {
+  const data = await readData();
+  refreshLanguageGroupCounts(data);
+  const user = data.users.find((item) => item._id === normalizeId(userId));
+  const userLanguages = new Set([
+    user?.nativeLanguage,
+    user?.learningLanguage,
+    ...(user?.learningLanguages || []),
+  ].filter(Boolean).map(languageValue));
+
+  return data.languageGroups
+    .filter((group) => group.isSystem)
+    .map((group) => hydrateLanguageGroup(group, data, userId))
+    .sort((a, b) => {
+      const aMatch = userLanguages.has(a.language) ? 1 : 0;
+      const bMatch = userLanguages.has(b.language) ? 1 : 0;
+      return bMatch - aMatch || b.memberCount - a.memberCount || a.name.localeCompare(b.name);
+    });
+}
+
+export async function getLanguageGroupFor(userId, slug) {
+  const data = await readData();
+  refreshLanguageGroupCounts(data);
+  const group = data.languageGroups.find((item) => item.slug === String(slug || "").toLowerCase());
+  if (!group) return null;
+  return hydrateLanguageGroup(group, data, userId, { includeMembers: true });
+}
+
+export async function getLanguageGroupPostsFor(userId, slug) {
+  const data = await readData();
+  refreshLanguageGroupCounts(data);
+  const group = data.languageGroups.find((item) => item.slug === String(slug || "").toLowerCase());
+  if (!group) {
+    const error = new Error("Language group not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const posts = data.posts
+    .filter((post) => !post.repostOf && !post.isDeleted)
+    .filter((post) => {
+      const author = data.users.find((user) => user._id === post.author);
+      if (!author) return false;
+      const languageMatch = post.language === group.language;
+      const nativeAuthorMatch = group.type === "native_language" && author.nativeLanguage === group.language;
+      const learningAuthorMatch =
+        group.type === "learning_language" &&
+        [author.learningLanguage, ...(author.learningLanguages || [])].map(languageValue).includes(group.language);
+      return languageMatch || nativeAuthorMatch || learningAuthorMatch;
+    })
+    .filter((post) => canViewPost(data, userId, post, { allowArchivedForAuthor: false }))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, 80)
+    .map((post) => hydratePost(post, data, userId));
+
+  return {
+    group: hydrateLanguageGroup(group, data, userId, { includeMembers: true }),
+    posts,
+  };
+}
+
+export async function syncLanguageGroupsFor(userId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    syncLanguageGroupsForUser(data, user);
+    refreshLanguageGroupCounts(data);
+    return {
+      groups: data.languageGroups
+        .filter((group) => group.memberIds?.includes(user._id))
+        .map((group) => hydrateLanguageGroup(group, data, user._id)),
+    };
+  });
+}
+
+export async function updateUserInterestsFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+
+    const selected = Array.isArray(payload.interests)
+      ? payload.interests
+      : Array.isArray(payload.selectedInterests)
+        ? payload.selectedInterests
+        : [];
+    const muted = Array.isArray(payload.mutedInterests) ? payload.mutedInterests : [];
+
+    user.interests = selected.map(normalizeHashtag).filter(Boolean).slice(0, 40);
+    user.mutedInterests = muted.map(normalizeHashtag).filter(Boolean).slice(0, 40);
+    if (payload.nativeLanguage !== undefined) user.nativeLanguage = languageValue(payload.nativeLanguage);
+    if (payload.learningLanguage !== undefined) {
+      user.learningLanguage = languageValue(payload.learningLanguage);
+      user.learningLanguages = [user.learningLanguage].filter(Boolean);
+    }
+
+    user.algorithmProfile ||= defaultAlgorithmProfile(user);
+    user.algorithmProfile.selectedInterests = user.interests;
+    user.algorithmProfile.preferredLanguages = [
+      user.nativeLanguage,
+      user.learningLanguage,
+      ...(user.learningLanguages || []),
+    ]
+      .filter(Boolean)
+      .map(languageValue);
+    user.interests.forEach((tag) => {
+      user.algorithmProfile.interestWeights[tag] = Math.max(Number(user.algorithmProfile.interestWeights[tag]) || 0, 12);
+    });
+    user.algorithmProfile.lastUpdatedAt = now();
+    user.updatedAt = now();
+    syncLanguageGroupsForUser(data, user);
+    refreshLanguageGroupCounts(data);
+
+    return publicUser(user);
+  });
+}
+
+export async function updateAlgorithmInterestsFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+
+    user.algorithmProfile ||= defaultAlgorithmProfile(user);
+    if (payload.selectedInterests !== undefined) {
+      const values = Array.isArray(payload.selectedInterests)
+        ? payload.selectedInterests
+        : payload.selectedInterests.toString().split(",");
+      user.algorithmProfile.selectedInterests = values.map(normalizeHashtag).filter(Boolean).slice(0, 40);
+      user.algorithmProfile.selectedInterests.forEach((tag) => {
+        user.algorithmProfile.interestWeights[tag] = Math.max(Number(user.algorithmProfile.interestWeights[tag]) || 0, 10);
+      });
+    }
+    if (payload.preferredLanguages !== undefined) {
+      const values = Array.isArray(payload.preferredLanguages)
+        ? payload.preferredLanguages
+        : payload.preferredLanguages.toString().split(",");
+      user.algorithmProfile.preferredLanguages = values.map(languageValue).filter(Boolean).slice(0, 20);
+    }
+    if (payload.feedMode !== undefined) {
+      const modes = new Set(["balanced", "mostly_following", "mostly_language_learning", "mostly_trending", "discovery", "chronological"]);
+      if (modes.has(payload.feedMode)) user.algorithmProfile.feedMode = payload.feedMode;
+    }
+    if (payload.contentPreferences && typeof payload.contentPreferences === "object") {
+      user.algorithmProfile.contentPreferences = {
+        ...user.algorithmProfile.contentPreferences,
+        ...payload.contentPreferences,
+      };
+    }
+    if (payload.mutedHashtags !== undefined) {
+      const values = Array.isArray(payload.mutedHashtags) ? payload.mutedHashtags : payload.mutedHashtags.toString().split(",");
+      user.algorithmProfile.mutedHashtags = values.map(normalizeHashtag).filter(Boolean).slice(0, 100);
+    }
+
+    user.algorithmProfile.lastUpdatedAt = now();
+    user.updatedAt = now();
+    return publicUser(user).algorithmProfile;
+  });
+}
+
+export async function resetAlgorithmFor(userId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+    user.algorithmProfile = defaultAlgorithmProfile(user);
+    data.algorithmEvents = data.algorithmEvents.filter((event) => event.user !== user._id);
+    user.updatedAt = now();
+    return user.algorithmProfile;
+  });
+}
+
+export async function recordAlgorithmEventFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = payload.postId ? data.posts.find((item) => item._id === normalizeId(payload.postId)) : null;
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+
+    const eventType = payload.eventType || payload.type || "view";
+    const event = {
+      _id: crypto.randomUUID(),
+      user: user._id,
+      post: post?._id || null,
+      eventType,
+      dwellTimeMs: Math.max(0, Number(payload.dwellTimeMs) || 0),
+      source: payload.source || "for_you",
+      createdAt: now(),
+    };
+
+    data.algorithmEvents.push(event);
+    if (post) {
+      applyInterestDelta(user, post, eventType, event.dwellTimeMs);
+      if (["view", "long_view"].includes(eventType)) {
+        post.views ||= [];
+        if (!post.views.includes(user._id)) post.views.push(user._id);
+        post.viewCount = post.views.length;
+      }
+    } else if (payload.hashtag) {
+      user.algorithmProfile ||= defaultAlgorithmProfile(user);
+      user.algorithmProfile.interestWeights ||= {};
+      const tag = normalizeHashtag(payload.hashtag);
+      if (tag) {
+        const delta = interestDeltaForEvent(eventType === "hashtag_click" ? "open_hashtag" : eventType);
+        user.algorithmProfile.interestWeights[tag] = Math.max(
+          -100,
+          Math.min(250, (Number(user.algorithmProfile.interestWeights[tag]) || 0) + delta)
+        );
+        user.algorithmProfile.lastUpdatedAt = now();
+      }
+    }
+    return event;
+  });
+}
+
+export async function recordPostViewFor(userId, postId, payload = {}) {
+  return recordAlgorithmEventFor(userId, {
+    ...payload,
+    postId,
+    eventType: (Number(payload.dwellTimeMs) || 0) > 5000 ? "long_view" : "view",
+  });
+}
+
+export async function hidePostFor(userId, postId, eventType = "hide") {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!user || !post) throw Object.assign(new Error("Post not found"), { status: 404 });
+
+    post.hiddenBy ||= [];
+    if (!post.hiddenBy.includes(user._id)) post.hiddenBy.push(user._id);
+    user.algorithmProfile ||= defaultAlgorithmProfile(user);
+    user.algorithmProfile.hiddenPosts ||= [];
+    if (!user.algorithmProfile.hiddenPosts.includes(post._id)) user.algorithmProfile.hiddenPosts.push(post._id);
+    applyInterestDelta(user, post, eventType);
+    data.algorithmEvents.push({
+      _id: crypto.randomUUID(),
+      user: user._id,
+      post: post._id,
+      eventType,
+      dwellTimeMs: 0,
+      source: "for_you",
+      createdAt: now(),
+    });
+    return { success: true };
+  });
+}
+
+export async function toggleDislikeFor(userId, postId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!user || !post || !canViewPost(data, user._id, post)) throw Object.assign(new Error("Post not found"), { status: 404 });
+    requireEmailVerified(user, "dislike posts");
+
+    post.dislikes ||= [];
+    const removing = post.dislikes.includes(user._id);
+    post.dislikes = removing ? post.dislikes.filter((id) => id !== user._id) : [...post.dislikes, user._id];
+    post.likes = (post.likes || []).filter((id) => id !== user._id);
+    post.dislikeCount = post.dislikes.length;
+    post.likeCount = post.likes.length;
+    if (!removing) applyInterestDelta(user, post, "dislike");
+    return hydratePost(post, data, user._id);
+  });
+}
+
+export async function toggleSaveFor(userId, postId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!user || !post || !canViewPost(data, user._id, post)) throw Object.assign(new Error("Post not found"), { status: 404 });
+    requireEmailVerified(user, "save posts");
+
+    post.saves ||= [];
+    const removing = post.saves.includes(user._id);
+    post.saves = removing ? post.saves.filter((id) => id !== user._id) : [...post.saves, user._id];
+    post.saveCount = post.saves.length;
+    if (!removing) applyInterestDelta(user, post, "save");
+    return hydratePost(post, data, user._id);
+  });
+}
+
+export async function getTrendingHashtagsFor(query = {}) {
+  const data = await readData();
+  const language = query.language?.toString().toLowerCase();
+  return data.hashtags
+    .filter((tag) => !tag.blocked)
+    .filter((tag) => !language || tag.language === language || tag.language === "all")
+    .map((tag) => ({ ...tag, trendingScore: calculateTrendingScore(data, tag.normalizedName) }))
+    .sort((a, b) => b.trendingScore - a.trendingScore)
+    .slice(0, Math.min(50, Number(query.limit) || 20));
+}
+
+export async function getHashtagPageFor(viewerId, tagName, query = {}) {
+  const data = await readData();
+  const tag = normalizeHashtag(tagName);
+  const tagRecord = data.hashtags.find((item) => item.normalizedName === tag) || {
+    name: tag,
+    normalizedName: tag,
+    postCount: 0,
+    trendingScore: 0,
+  };
+  const posts = data.posts
+    .filter((post) => !post.repostOf && (post.hashtags || []).includes(tag) && canViewPost(data, viewerId, post, { allowArchivedForAuthor: false }))
+    .sort((a, b) => calculatePostHotScore(b) - calculatePostHotScore(a))
+    .map((post) => hydratePost(post, data, viewerId));
+  const relatedTags = [...new Set(posts.flatMap((post) => post.hashtags || []).filter((item) => item !== tag))].slice(0, 12);
+  const paged = paginate(posts, query.page, query.limit);
+
+  return {
+    tag,
+    postCount: posts.length,
+    trendingScore: calculateTrendingScore(data, tag),
+    relatedTags,
+    posts: paged.items,
+    page: paged.page,
+    limit: paged.limit,
+    total: paged.total,
+    hasMore: paged.hasMore,
+    ...tagRecord,
+  };
+}
+
+export async function searchHashtagsFor(query = "") {
+  const data = await readData();
+  const q = normalizeHashtag(query);
+  return data.hashtags
+    .filter((tag) => !tag.blocked)
+    .filter((tag) => !q || tag.normalizedName.includes(q))
+    .sort((a, b) => b.trendingScore - a.trendingScore)
+    .slice(0, 20);
+}
+
+export async function muteHashtagFor(userId, tagName) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const tag = normalizeHashtag(tagName);
+    if (!user || !tag) throw Object.assign(new Error("Hashtag not found"), { status: 404 });
+    user.algorithmProfile ||= defaultAlgorithmProfile(user);
+    user.algorithmProfile.mutedHashtags ||= [];
+    if (!user.algorithmProfile.mutedHashtags.includes(tag)) {
+      user.algorithmProfile.mutedHashtags.push(tag);
+    }
+    user.algorithmProfile.lastUpdatedAt = now();
+    user.updatedAt = now();
+    return { success: true, mutedHashtags: user.algorithmProfile.mutedHashtags };
+  });
+}
+
+export async function unmuteHashtagFor(userId, tagName) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    const tag = normalizeHashtag(tagName);
+    if (!user || !tag) throw Object.assign(new Error("Hashtag not found"), { status: 404 });
+    user.algorithmProfile ||= defaultAlgorithmProfile(user);
+    user.algorithmProfile.mutedHashtags = (user.algorithmProfile.mutedHashtags || []).filter((item) => item !== tag);
+    user.algorithmProfile.lastUpdatedAt = now();
+    user.updatedAt = now();
+    return { success: true, mutedHashtags: user.algorithmProfile.mutedHashtags };
+  });
+}
+
+export async function recalculateAllHashtagsFor(userId) {
+  return withData(async (data) => {
+    requireAdmin(data, userId);
+    data.hashtags = [];
+    data.posts
+      .filter((post) => !post.repostOf && !post.isDeleted)
+      .forEach((post) => updateHashtagStats(data, post));
+    return {
+      success: true,
+      hashtags: data.hashtags,
+    };
+  });
+}
+
+export async function recalculatePostHashtagsFor(userId, postId) {
+  return withData(async (data) => {
+    const user = requireStaff(data, userId);
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!post) throw Object.assign(new Error("Post not found"), { status: 404 });
+    const classification = classifyPostText(post.text || post.content || "", {
+      category: post.category,
+      hashtags: post.hashtags,
+      fallbackLanguage: post.language,
+    });
+    post.hashtags = classification.hashtags;
+    post.detectedTags = classification.detectedTags;
+    post.finalTags = classification.finalTags;
+    post.category = classification.category;
+    post.subcategory = classification.subcategory;
+    post.tone = classification.tone;
+    post.qualityScore = classification.qualityScore;
+    post.spamScore = classification.spamScore;
+    post.updatedAt = now();
+    updateHashtagStats(data, post);
+    data.moderationActions.push({
+      _id: crypto.randomUUID(),
+      staff: user._id,
+      targetUser: post.author,
+      type: "recalculateHashtags",
+      reason: "Recalculated post hashtags",
+      days: null,
+      until: null,
+      createdAt: now(),
+    });
+    return hydratePost(post, data, userId);
+  });
+}
+
+export async function getSuggestionsFor(userId, mode = "all") {
+  const data = await readData();
+  const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+  if (!currentUser) return { users: [] };
+  const dismissed = new Set(currentUser.dismissedSuggestions || []);
+
+  const users = data.users
+    .filter((user) => user._id !== currentUser._id && user.isOnboarded && !dismissed.has(user._id))
+    .filter((user) => !currentUser.following?.includes(user._id) && !currentUser.blockedUsers?.includes(user._id) && !user.blockedUsers?.includes(currentUser._id))
+    .filter((user) => !user.fullBannedAt && !isFuture(user.bannedUntil) && !isFuture(user.shadowBannedUntil))
+    .map((user) => {
+      const mutualFriends = (user.followers || []).filter((id) => currentUser.following?.includes(id));
+      const sameLearningLanguage = user.learningLanguage && user.learningLanguage === currentUser.learningLanguage;
+      const oppositeLanguagePairMatch =
+        user.nativeLanguage &&
+        currentUser.nativeLanguage &&
+        user.nativeLanguage === currentUser.learningLanguage &&
+        user.learningLanguage === currentUser.nativeLanguage;
+      const sharedInterests = Object.keys(currentUser.algorithmProfile?.interestWeights || {}).filter((tag) =>
+        Object.keys(user.algorithmProfile?.interestWeights || {}).includes(tag)
+      );
+      const score =
+        (oppositeLanguagePairMatch ? 4 : 0) +
+        (sameLearningLanguage ? 3.5 : 0) +
+        mutualFriends.length * 3 +
+        sharedInterests.length * 2.5 +
+        (user.isOnline ? 1.8 : 0) +
+        (user.bio ? 1.5 : 0);
+      const reason = oppositeLanguagePairMatch
+        ? `Native ${user.nativeLanguage} speaker learning ${user.learningLanguage}`
+        : sameLearningLanguage
+          ? `Also learning ${user.learningLanguage}`
+          : sharedInterests[0]
+            ? `You both like ${sharedInterests[0]}`
+            : mutualFriends.length
+              ? `Followed by ${mutualFriends.length} people you know`
+              : "Active language learner";
+      return {
+        ...withRelationship(user, currentUser._id, data),
+        mutualFriendsCount: mutualFriends.length,
+        sharedInterests,
+        reason,
+        score,
+      };
+    })
+    .filter((user) => mode === "all" || (mode === "language" ? /learning|speaker/i.test(user.reason) : user.sharedInterests.length > 0))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 30);
+
+  return { users };
+}
+
+export async function dismissSuggestionFor(userId, targetUserId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+    user.dismissedSuggestions ||= [];
+    if (!user.dismissedSuggestions.includes(normalizeId(targetUserId))) {
+      user.dismissedSuggestions.push(normalizeId(targetUserId));
+    }
+    user.updatedAt = now();
+    return { success: true };
+  });
+}
+
+export async function getRecommendedUsersFor(userId) {
+  const data = await readData();
+  const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+  if (!currentUser) return [];
+
+  const friendIds = new Set(currentUser.friends || []);
+  return data.users
+    .filter(
+      (user) =>
+        user._id !== currentUser._id &&
+        !friendIds.has(user._id) &&
+        user.isOnboarded
+    )
+    .map((user) => withRelationship(user, currentUser._id, data));
+}
+
+export async function getFriendsFor(userId) {
+  const data = await readData();
+  const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+  if (!currentUser) return [];
+
+  const friendIds = new Set(currentUser.friends || []);
+  return data.users
+    .filter((user) => friendIds.has(user._id))
+    .map((user) => withRelationship(user, currentUser._id, data));
+}
+
+export async function createFriendRequest(senderId, recipientId) {
+  return withData(async (data) => {
+    if (normalizeId(senderId) === normalizeId(recipientId)) {
+      const error = new Error("You can't send a friend request to yourself");
+      error.status = 400;
+      throw error;
+    }
+
+    const sender = data.users.find((user) => user._id === normalizeId(senderId));
+    const recipient = data.users.find((user) => user._id === normalizeId(recipientId));
+
+    if (!sender || !recipient) {
+      const error = new Error("Recipient not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (recipient.friends.includes(sender._id)) {
+      const error = new Error("You are already friends with this user");
+      error.status = 400;
+      throw error;
+    }
+
+    const existingRequest = data.friendRequests.find(
+      (request) =>
+        (request.sender === sender._id && request.recipient === recipient._id) ||
+        (request.sender === recipient._id && request.recipient === sender._id)
+    );
+
+    if (existingRequest) {
+      const error = new Error("A friend request already exists between you and this user");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    const friendRequest = {
+      _id: crypto.randomUUID(),
+      sender: sender._id,
+      recipient: recipient._id,
+      status: "pending",
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.friendRequests.push(friendRequest);
+    return friendRequest;
+  });
+}
+
+export async function acceptFriendRequestFor(userId, requestId) {
+  return withData(async (data) => {
+    const friendRequest = data.friendRequests.find(
+      (request) => request._id === normalizeId(requestId)
+    );
+
+    if (!friendRequest) {
+      const error = new Error("Friend request not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (friendRequest.recipient !== normalizeId(userId)) {
+      const error = new Error("You are not authorized to accept this friend request");
+      error.status = 403;
+      throw error;
+    }
+
+    friendRequest.status = "accepted";
+    friendRequest.updatedAt = now();
+
+    const sender = data.users.find((user) => user._id === friendRequest.sender);
+    const recipient = data.users.find((user) => user._id === friendRequest.recipient);
+
+    if (sender && !sender.friends.includes(recipient._id)) {
+      sender.friends.push(recipient._id);
+      sender.updatedAt = now();
+    }
+
+    if (recipient && !recipient.friends.includes(sender._id)) {
+      recipient.friends.push(sender._id);
+      recipient.updatedAt = now();
+    }
+
+    return { message: "Friend request accepted" };
+  });
+}
+
+export async function getFriendRequestsFor(userId) {
+  const data = await readData();
+
+  const populate = (request, field) => {
+    const user = data.users.find((item) => item._id === request[field]);
+    return {
+      ...request,
+      [field]: withRelationship(user, userId, data),
+    };
+  };
+
+  const incomingReqs = data.friendRequests
+    .filter(
+      (request) =>
+        request.recipient === normalizeId(userId) && request.status === "pending"
+    )
+    .map((request) => populate(request, "sender"));
+
+  const acceptedReqs = data.friendRequests
+    .filter(
+      (request) =>
+        request.sender === normalizeId(userId) && request.status === "accepted"
+    )
+    .map((request) => populate(request, "recipient"));
+
+  return { incomingReqs, acceptedReqs };
+}
+
+export async function getOutgoingFriendRequestsFor(userId) {
+  const data = await readData();
+
+  return data.friendRequests
+    .filter(
+      (request) => request.sender === normalizeId(userId) && request.status === "pending"
+    )
+    .map((request) => {
+      const recipient = data.users.find((user) => user._id === request.recipient);
+      return {
+        ...request,
+        recipient: withRelationship(recipient, userId, data),
+      };
+    });
+}
+
+function canMessage(data, senderId, recipientId) {
+  const sender = data.users.find((user) => user._id === normalizeId(senderId));
+  const recipient = data.users.find((user) => user._id === normalizeId(recipientId));
+  if (!sender || !recipient) return false;
+  if (sender.blockedUsers?.includes(recipient._id) || recipient.blockedUsers?.includes(sender._id)) return false;
+  if (sender.isBot || staffRoles.has(sender.role)) return true;
+
+  if (recipient.allowMessagesFrom === "nobody") return false;
+
+  if (recipient.allowMessagesFrom === "followers") {
+    return recipient.followers?.includes(sender._id);
+  }
+
+  if (recipient.allowMessagesFrom === "following") {
+    return recipient.following?.includes(sender._id);
+  }
+
+  if (recipient.allowMessagesFrom === "mutuals") {
+    return (
+      recipient.followers?.includes(sender._id) &&
+      recipient.following?.includes(sender._id)
+    );
+  }
+
+  return true;
+}
+
+function isMessageReported(data, messageId) {
+  const targetId = normalizeId(messageId);
+  return data.reports.some(
+    (report) =>
+      report.targetType === "message" &&
+      report.targetId === targetId &&
+      report.status !== "dismissed"
+  );
+}
+
+function reportedMessageIds(data) {
+  return new Set(
+    data.reports
+      .filter((report) => report.targetType === "message" && report.targetId)
+      .map((report) => report.targetId)
+  );
+}
+
+function hydrateSharedPostForMessage(sharedPostId, data, viewerId) {
+  if (!sharedPostId) return null;
+  const sharedPost = data.posts.find((post) => post._id === normalizeId(sharedPostId));
+  if (!sharedPost || !canViewPost(data, viewerId, sharedPost, { allowArchivedForAuthor: false })) {
+    return unavailablePost(sharedPost);
+  }
+
+  return hydratePost(sharedPost, data, viewerId);
+}
+
+function hydrateMessage(message, data, viewerId = null) {
+  const currentId = normalizeId(viewerId);
+  const replySource = message.replyTo
+    ? data.messages.find((item) => item._id === message.replyTo)
+    : null;
+  const senderUser = data.users.find((user) => user._id === message.sender);
+  const recipientUser = data.users.find((user) => user._id === message.recipient);
+  const hiddenFromViewer = Boolean(message.botHidden && !canViewBotHiddenTarget(data, currentId, message.sender));
+
+  return {
+    ...message,
+    text: hiddenFromViewer ? "Message under review" : message.text,
+    media: hiddenFromViewer ? null : message.media,
+    voice: hiddenFromViewer ? null : message.voice,
+    gif: hiddenFromViewer ? null : message.gif,
+    sharedPostId: hiddenFromViewer ? null : message.sharedPostId,
+    senderUser: withRelationship(senderUser, currentId || message.sender, data),
+    recipientUser: withRelationship(recipientUser, currentId || message.recipient, data),
+    sharedPost: hiddenFromViewer ? null : hydrateSharedPostForMessage(message.sharedPostId, data, currentId || message.sender),
+    reactions: (message.reactions || []).map((reaction) => ({
+      emoji: reaction.emoji,
+      users: reaction.users || [],
+      count: reaction.users?.length || 0,
+      isMine: Boolean(currentId && reaction.users?.includes(currentId)),
+    })),
+    replyToMessage: replySource
+      ? {
+          _id: replySource._id,
+          sender: replySource.sender,
+          text:
+            replySource.deletedAt
+              ? "Message deleted"
+              : replySource.botHidden && !canViewBotHiddenTarget(data, currentId, replySource.sender)
+                ? "Message under review"
+                : replySource.text,
+          mediaKind:
+            replySource.botHidden && !canViewBotHiddenTarget(data, currentId, replySource.sender)
+              ? null
+              : replySource.media?.kind || (replySource.voice ? "voice" : replySource.gif ? "gif" : null),
+          sharedPostId:
+            replySource.botHidden && !canViewBotHiddenTarget(data, currentId, replySource.sender)
+              ? null
+              : replySource.sharedPostId || null,
+          deletedAt: replySource.deletedAt || null,
+        }
+      : null,
+    ...botReviewState(message),
+    hiddenFromViewer,
+  };
+}
+
+function canAccessMessage(message, userId) {
+  const currentId = normalizeId(userId);
+  return message?.sender === currentId || message?.recipient === currentId;
+}
+
+function getBotUser(data) {
+  const config = getEnvBotConfig();
+  return data.users.find(
+    (user) => user.isBot || user.username?.toLowerCase() === config.username.toLowerCase()
+  );
+}
+
+function botBrainConfig(data) {
+  const settings = effectiveBotSettings(data);
+  return {
+    ...(data.botTraining || initialData.botTraining),
+    allowModelReply: settings.allowModelReply,
+    thankFollowers: settings.thankFollowEnabled,
+    socialMode: true,
+  };
+}
+
+function textMentionsBot(text = "", bot) {
+  if (!bot?.username) return false;
+  return text.toLowerCase().includes(`@${bot.username.toLowerCase()}`);
+}
+
+function getBotMemory(data, userId) {
+  const currentId = normalizeId(userId);
+  let memory = data.botMemories.find((item) => item.userId === currentId);
+  if (!memory) {
+    const createdAt = now();
+    memory = {
+      _id: crypto.randomUUID(),
+      userId: currentId,
+      casual: {
+        displayName: "",
+        preferredLanguage: "",
+        favoriteTopics: [],
+        creatorGoals: [],
+        appPreferences: [],
+        commonIssues: [],
+        languageGoals: [],
+        conversationPreferences: [],
+      },
+      moderation: {
+        warningCount: 0,
+        muteCount: 0,
+        tempBanCount: 0,
+        successfulAppeals: 0,
+        lastRestrictionAt: null,
+      },
+      shortTerm: [],
+      summary: "",
+      createdAt,
+      updatedAt: createdAt,
+    };
+    data.botMemories.push(memory);
+  }
+  return memory;
+}
+
+function uniquePush(list, value, max = 12) {
+  const clean = String(value || "").trim().slice(0, 80);
+  if (!clean) return list || [];
+  const next = Array.isArray(list) ? list.filter((item) => item.toLowerCase() !== clean.toLowerCase()) : [];
+  next.unshift(clean);
+  return next.slice(0, max);
+}
+
+function rememberBotCasualMemory(data, user, text = "") {
+  if (!env.OLLAMA_MEMORY_ENABLED || !user || user.isBot) return null;
+  const body = String(text || "").trim();
+  if (!body) return null;
+
+  const memory = getBotMemory(data, user._id);
+  memory.shortTerm = [
+    {
+      text: body.slice(0, 260),
+      createdAt: now(),
+    },
+    ...(memory.shortTerm || []),
+  ].slice(0, 12);
+
+  const lowered = body.toLowerCase();
+  const topicMatch = lowered.match(/\b(i like|i love|favorite|fav)\s+([a-z0-9 #_-]{2,40})/i);
+  const goalMatch = lowered.match(/\b(i want to|trying to|my goal is to)\s+([a-z0-9 #_-]{3,70})/i);
+  const languageMatch = lowered.match(/\b(learning|practice|practicing)\s+(english|spanish|french|creole|haitian creole|portuguese|german|japanese|korean|mandarin|arabic)\b/i);
+  const preferenceMatch = lowered.match(/\b(i prefer|please call me|call me)\s+([a-z0-9 _-]{2,40})/i);
+
+  if (topicMatch) memory.casual.favoriteTopics = uniquePush(memory.casual.favoriteTopics, topicMatch[2]);
+  if (goalMatch) memory.casual.creatorGoals = uniquePush(memory.casual.creatorGoals, goalMatch[2]);
+  if (languageMatch) memory.casual.languageGoals = uniquePush(memory.casual.languageGoals, languageMatch[2]);
+  if (preferenceMatch) memory.casual.conversationPreferences = uniquePush(memory.casual.conversationPreferences, preferenceMatch[2]);
+  if (!memory.casual.displayName && user.fullName) memory.casual.displayName = user.fullName;
+  if (!memory.casual.preferredLanguage && user.nativeLanguage) memory.casual.preferredLanguage = user.nativeLanguage;
+
+  if ((memory.shortTerm || []).length >= 8) {
+    memory.summary = `Recent app-help themes: ${(memory.shortTerm || [])
+      .slice(0, 5)
+      .map((item) => item.text)
+      .join(" | ")
+      .slice(0, 500)}`;
+  }
+
+  memory.updatedAt = now();
+  return memory;
+}
+
+async function appendBotMessage(data, recipientUser, text, replyTo = null) {
+  const bot = getBotUser(data);
+  if (!bot || !recipientUser) return null;
+
+  const createdAt = now();
+  const message = {
+    _id: crypto.randomUUID(),
+    sender: bot._id,
+    recipient: recipientUser._id,
+    text: (text || "").trim().slice(0, 2000),
+    media: null,
+    voice: null,
+    gif: null,
+    sharedPostId: null,
+    replyTo,
+    readBy: [bot._id],
+    editedAt: null,
+    editHistory: [],
+    deletedAt: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  data.messages.push(message);
+  addNotification(data, recipientUser._id, {
+    actorId: bot._id,
+    type: "message",
+    title: "MEDIA ModBot replied",
+    message: "The local moderation assistant sent you a message.",
+  });
+  return message;
+}
+
+function maybeBotRepost(data, post, author) {
+  if (process.env.BOT_AUTO_REPOST !== "true") return null;
+
+  const bot = getBotUser(data);
+  if (!bot || !post || post.author === bot._id || post.repostOf) return null;
+  if (data.posts.some((item) => item.author === bot._id && item.repostOf === post._id)) return null;
+
+  const followerScore = Math.min(0.45, (author.followers?.length || 0) / 5000);
+  const cleanBonus = (author.moderationRecords || []).length === 0 ? 0.08 : 0;
+  const verifiedBonus = author.verifiedBadgeOverride ? 0.08 : 0;
+  const chance = 0.03 + followerScore + cleanBonus + verifiedBonus;
+  if (Math.random() > chance) return null;
+
+  const createdAt = now();
+  const repost = {
+    _id: crypto.randomUUID(),
+    author: bot._id,
+    text: "",
+    language: post.language,
+    media: null,
+    thumbnail: post.thumbnail || post.media?.url || null,
+    archived: false,
+    repostOf: post._id,
+    likes: [],
+    comments: [],
+    reportCount: 0,
+    createdAt,
+    updatedAt: createdAt,
+  };
+  data.posts.push(repost);
+  return repost;
+}
+
+async function maybeBotSocialComment(data, post, author) {
+  const settings = effectiveBotSettings(data);
+  if (!settings.randomCommentEnabled) return null;
+
+  const bot = getBotUser(data);
+  if (!bot || !post || !author || author.isBot || post.author === bot._id || post.repostOf) return null;
+  if (post.visibility !== "public" || post.archived || post.isArchived || post.isDeleted) return null;
+  if (author.fullBannedAt || isFuture(author.bannedUntil) || isFuture(author.shadowBannedUntil)) return null;
+
+  const hourAgo = Date.now() - 60 * 60 * 1000;
+  const recentBotComments = data.posts.reduce((total, item) => {
+    const countInPost = (comments = []) =>
+      comments.reduce(
+        (sum, comment) =>
+          sum +
+          (comment.author === bot._id && new Date(comment.createdAt).getTime() >= hourAgo ? 1 : 0) +
+          countInPost(comment.replies || []),
+        0
+      );
+    return total + countInPost(item.comments || []);
+  }, 0);
+  if (recentBotComments >= env.BOT_MAX_RANDOM_COMMENTS_PER_HOUR) return null;
+
+  const cleanRecordBoost = (author.moderationRecords || []).length === 0 ? 0.08 : 0;
+  const reputationBoost = Math.min(0.12, (author.followers?.length || 0) / 10000);
+  const chance = 0.02 + cleanRecordBoost + reputationBoost;
+  if (Math.random() > chance) return null;
+
+  const reply = await generateBotReply({
+    text: `React naturally and briefly to this public post: ${post.text || post.caption || "new post"}`,
+    userName: author.fullName || author.username,
+    userId: author._id,
+    botConfig: botBrainConfig(data),
+    context: {
+      source: "post",
+      targetType: "post",
+      targetId: post._id,
+      allowModelReply: true,
+      allowPublicSocialReply: true,
+      forceReply: true,
+    },
+  });
+
+  if (!reply) return null;
+  const createdAt = now();
+  const comment = {
+    _id: crypto.randomUUID(),
+    author: bot._id,
+    text: reply.slice(0, 800),
+    parentId: null,
+    rootId: null,
+    depth: 0,
+    language: languageValue(post.language || bot.nativeLanguage || "english"),
+    hashtags: [],
+    detectedTags: [],
+    replies: [],
+    gif: null,
+    pinnedAt: null,
+    pinnedBy: null,
+    likes: [],
+    reportCount: 0,
+    likeCount: 0,
+    replyCount: 0,
+    createdAt,
+    updatedAt: createdAt,
+    editedAt: null,
+    editHistory: [],
+    deletedAt: null,
+  };
+  comment.rootId = comment._id;
+  post.comments ||= [];
+  post.comments.push(comment);
+  post.commentCount = countCommentTree(post.comments);
+  post.updatedAt = createdAt;
+  addNotification(data, author._id, {
+    actorId: bot._id,
+    type: "comment",
+    title: "MEDIA ModBot commented",
+    message: "The local assistant left a quick comment on your post.",
+  });
+  createBotAudit(data, {
+    actorId: bot._id,
+    actorType: "bot",
+    action: "bot_social_comment",
+    targetType: "post",
+    targetId: post._id,
+    reason: "Reputation-based social comment.",
+    result: "commented",
+    meta: { authorFollowers: author.followers?.length || 0 },
+  });
+  return comment;
+}
+
+export async function getMessagesBetween(userId, targetUserId) {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    const targetId = normalizeId(targetUserId);
+    const currentUser = data.users.find((user) => user._id === currentId);
+    const targetUser = data.users.find((user) => user._id === targetId);
+
+    if (!currentUser || !targetUser) {
+      const error = new Error("Conversation user not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (currentUser.blockedUsers?.includes(targetId) || targetUser.blockedUsers?.includes(currentId)) {
+      const error = new Error("This conversation is blocked.");
+      error.status = 403;
+      throw error;
+    }
+
+    const messages = data.messages
+      .filter(
+        (message) =>
+          (message.sender === currentId && message.recipient === targetId) ||
+          (message.sender === targetId && message.recipient === currentId)
+      )
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    messages.forEach((message) => {
+      message.readBy ||= [message.sender];
+      if (
+        currentUser.readReceiptsEnabled !== false &&
+        message.recipient === currentId &&
+        !message.readBy.includes(currentId)
+      ) {
+        message.readBy.push(currentId);
+      }
+    });
+
+    return messages.map((message) => hydrateMessage(message, data, currentId));
+  });
+}
+
+export async function createMessage({ sender, recipient, text, mediaDataUrl, mediaName, gif, replyTo, sharedPostId, clientId: rawClientId }) {
+  return withData(async (data) => {
+    const senderUser = data.users.find((user) => user._id === normalizeId(sender));
+    const recipientUser = data.users.find((user) => user._id === normalizeId(recipient));
+
+    if (!senderUser || !recipientUser) {
+      const error = new Error("Conversation user not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(senderUser, "message people");
+    requireNoBotRestriction(senderUser, "message", "message people");
+
+    const clientId = textLimit(rawClientId || "", 120);
+    if (clientId) {
+      const existingMessage = data.messages.find(
+        (message) => message.sender === senderUser._id && message.clientId === clientId
+      );
+      if (existingMessage) return hydrateMessage(existingMessage, data, senderUser._id);
+    }
+
+    if (!canMessage(data, senderUser._id, recipientUser._id)) {
+      const error = new Error("This user is not accepting messages from you");
+      error.status = 403;
+      throw error;
+    }
+
+    if (isAccountBanned(senderUser) || isFuture(senderUser.messageBanUntil)) {
+      const ban = getActiveModeration(senderUser).ban;
+      const reason = senderUser.messageBanReason || senderUser.banReason || "Messaging restricted";
+      const until = senderUser.messageBanUntil || ban?.until || "admin review clears this restriction";
+      const error = new Error(`You cannot message until ${until}: ${ban?.reason || reason}`);
+      error.status = 403;
+      throw error;
+    }
+
+    const trimmedText = (text || "").trim();
+    const media = mediaDataUrl
+      ? await saveDataUrlMedia(mediaDataUrl, mediaName || "message-media")
+      : null;
+    const voice = media?.mimeType?.startsWith("audio/") ? media : null;
+    const attachment = voice ? null : media;
+
+    const gifPayload = gif?.url
+      ? {
+          url: gif.url,
+          title: gif.title || "GIF",
+          source: gif.source || "gif",
+        }
+      : null;
+    const sharedPost = sharedPostId
+      ? data.posts.find((post) => post._id === normalizeId(sharedPostId))
+      : null;
+
+    if (sharedPostId) {
+      if (
+        !sharedPost ||
+        !canViewPost(data, senderUser._id, sharedPost, { allowArchivedForAuthor: false }) ||
+        !canViewPost(data, recipientUser._id, sharedPost, { allowArchivedForAuthor: false })
+      ) {
+        const error = new Error("This post cannot be shared with that user.");
+        error.status = 403;
+        throw error;
+      }
+    }
+
+    if (!trimmedText && !media && !gifPayload && !sharedPost) {
+      const error = new Error("Message cannot be empty");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    const replySource = replyTo
+      ? data.messages.find(
+          (message) =>
+            message._id === normalizeId(replyTo) &&
+            ((message.sender === senderUser._id && message.recipient === recipientUser._id) ||
+              (message.sender === recipientUser._id && message.recipient === senderUser._id))
+        )
+      : null;
+
+    const message = {
+      _id: crypto.randomUUID(),
+      clientId: clientId || null,
+      status: "sent",
+      sender: senderUser._id,
+      recipient: recipientUser._id,
+      text: trimmedText,
+      media: attachment,
+      voice,
+      gif: gifPayload,
+      sharedPostId: sharedPost?._id || null,
+      replyTo: replySource?._id || null,
+      readBy: [senderUser._id],
+      editedAt: null,
+      editHistory: [],
+      deletedAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.messages.push(message);
+    if (sharedPost) {
+      sharedPost.shareCount = Number(sharedPost.shareCount || 0) + 1;
+      sharedPost.updatedAt = now();
+    }
+    const bot = getBotUser(data);
+    const mentionsBot = textMentionsBot(trimmedText, bot);
+    const botShouldReply = bot && !senderUser.isBot && (recipientUser._id === bot._id || mentionsBot);
+    const moderationConcern = detectModerationConcern(trimmedText);
+
+    if (moderationConcern) {
+      addNotification(data, senderUser._id, {
+        actorId: bot?._id || null,
+        type: "warning",
+        title: "Message moderation notice",
+        message: "MEDIA ModBot noticed language that may need review. Please keep messages safe and respectful.",
+      });
+    }
+
+    if (botShouldReply) {
+      rememberBotCasualMemory(data, senderUser, trimmedText);
+      const reply = await generateBotReply({
+        text: trimmedText,
+        userName: senderUser.fullName,
+        userId: senderUser._id,
+        botConfig: botBrainConfig(data),
+        context: {
+          source: "dm",
+          isDirectMessage: recipientUser._id === bot._id,
+          mentionedBot: mentionsBot,
+          targetType: "message",
+          targetId: message._id,
+          allowModelReply: true,
+        },
+      });
+      await appendBotMessage(data, senderUser, reply, message._id);
+    }
+    addNotification(data, recipientUser._id, {
+      actorId: senderUser._id,
+      type: replySource ? "message-reply" : sharedPost ? "message-share" : "message",
+      title: replySource ? "New message reply" : sharedPost ? "Post shared with you" : "New message",
+      message: replySource
+        ? `${senderUser.fullName} replied to your message.`
+        : sharedPost
+          ? `${senderUser.fullName} shared a post with you.`
+        : `${senderUser.fullName} sent you a message.`,
+    });
+
+    return hydrateMessage(message, data, senderUser._id);
+  });
+}
+
+export async function sharePostFor(userId, postId, payload = {}) {
+  return withData(async (data) => {
+    const sender = data.users.find((user) => user._id === normalizeId(userId));
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    const requestedRecipientIds = [
+      ...(Array.isArray(payload.recipientIds) ? payload.recipientIds : []),
+      payload.recipientId,
+    ]
+      .map(normalizeId)
+      .filter(Boolean);
+    const recipientIds = [...new Set(requestedRecipientIds)].slice(0, 10);
+
+    if (!sender || !post) {
+      const error = new Error("Share target not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (recipientIds.length === 0) {
+      const error = new Error("Choose at least one person to share with.");
+      error.status = 400;
+      throw error;
+    }
+
+    requireEmailVerified(sender, "share posts");
+    requireNoBotRestriction(sender, "message", "share posts");
+    if (isAccountBanned(sender) || isFuture(sender.messageBanUntil)) {
+      const reason = sender.messageBanReason || sender.banReason || "Messaging restricted";
+      const error = new Error(`You cannot share posts right now: ${reason}`);
+      error.status = 403;
+      throw error;
+    }
+
+    if (!canViewPost(data, sender._id, post, { allowArchivedForAuthor: false })) {
+      const error = new Error("This post cannot be shared with that user.");
+      error.status = 403;
+      throw error;
+    }
+
+    const text = (payload.message || "").toString().trim().slice(0, 280);
+    const messages = [];
+    const failures = [];
+
+    recipientIds.forEach((recipientId) => {
+      const recipient = data.users.find((user) => user._id === recipientId);
+
+      if (!recipient) {
+        failures.push({ recipientId, reason: "User not found." });
+        return;
+      }
+
+      if (recipient._id === sender._id) {
+        failures.push({ recipientId, reason: "You cannot share a post to yourself." });
+        return;
+      }
+
+      if (!sender.following?.includes(recipient._id)) {
+        failures.push({ recipientId, reason: "You can only share with people you follow." });
+        return;
+      }
+
+      if (!canMessage(data, sender._id, recipient._id)) {
+        failures.push({ recipientId, reason: "This user is not accepting messages from you." });
+        return;
+      }
+
+      if (!canViewPost(data, recipient._id, post, { allowArchivedForAuthor: false })) {
+        failures.push({ recipientId, reason: "This user cannot view that post." });
+        return;
+      }
+
+      const createdAt = now();
+      const message = {
+        _id: crypto.randomUUID(),
+        sender: sender._id,
+        recipient: recipient._id,
+        text,
+        media: null,
+        voice: null,
+        gif: null,
+        sharedPostId: post._id,
+        replyTo: null,
+        readBy: [sender._id],
+        editedAt: null,
+        editHistory: [],
+        deletedAt: null,
+        createdAt,
+        updatedAt: createdAt,
+      };
+
+      data.messages.push(message);
+      messages.push(message);
+      addNotification(data, recipient._id, {
+        actorId: sender._id,
+        type: "message-share",
+        title: "Post shared with you",
+        message: `${sender.fullName} shared a post with you.`,
+      });
+    });
+
+    if (messages.length === 0) {
+      const error = new Error(failures[0]?.reason || "Could not share this post.");
+      error.status = 403;
+      error.failures = failures;
+      throw error;
+    }
+
+    post.shareCount = Number(post.shareCount || 0) + messages.length;
+    post.updatedAt = now();
+
+    const hydratedMessages = messages.map((message) => hydrateMessage(message, data, sender._id));
+
+    if (recipientIds.length === 1 && !Array.isArray(payload.recipientIds)) {
+      return hydratedMessages[0];
+    }
+
+    return {
+      success: true,
+      sentCount: hydratedMessages.length,
+      failedCount: failures.length,
+      messages: hydratedMessages,
+      failures,
+    };
+  });
+}
+
+export async function editMessageFor(userId, messageId, text = "") {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    const message = data.messages.find((item) => item._id === normalizeId(messageId));
+
+    if (!message || message.sender !== currentId || message.deletedAt) {
+      const error = new Error("Message not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const body = text.trim();
+    if (!body) {
+      const error = new Error("Message cannot be empty");
+      error.status = 400;
+      throw error;
+    }
+
+    const editedAt = now();
+    const previousText = message.text || "";
+    const nextText = body.slice(0, 2000);
+    message.editHistory ||= [];
+    message.editHistory.push({
+      previousText,
+      nextText,
+      editedBy: currentId,
+      editedAt,
+    });
+    message.text = nextText;
+    message.editedAt = editedAt;
+    message.updatedAt = message.editedAt;
+    return hydrateMessage(message, data, currentId);
+  });
+}
+
+export async function deleteMessageFor(userId, messageId) {
+  return withData(async (data) => {
+    const currentUser = data.users.find((user) => user._id === normalizeId(userId));
+    const message = data.messages.find((item) => item._id === normalizeId(messageId));
+
+    if (!currentUser || !message) {
+      const error = new Error("Message not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const canDelete =
+      message.sender === currentUser._id ||
+      (staffRoles.has(currentUser.role) && isMessageReported(data, message._id));
+    if (!canDelete) {
+      const error = new Error("You can only delete your own messages.");
+      error.status = 403;
+      throw error;
+    }
+
+    message.text = "";
+    message.media = null;
+    message.voice = null;
+    message.gif = null;
+    message.sharedPostId = null;
+    message.deletedAt = now();
+    message.updatedAt = message.deletedAt;
+    return hydrateMessage(message, data, currentUser._id);
+  });
+}
+
+export async function toggleMessageReactionFor(userId, messageId, emoji = "") {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    const user = data.users.find((item) => item._id === currentId);
+    const message = data.messages.find((item) => item._id === normalizeId(messageId));
+
+    if (!user || !message || !canAccessMessage(message, currentId) || message.deletedAt) {
+      const error = new Error("Message not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const cleanEmoji = String(emoji || "").trim();
+    if (!allowedMessageReactions.has(cleanEmoji)) {
+      const error = new Error("Choose a supported reaction.");
+      error.status = 400;
+      throw error;
+    }
+
+    message.reactions ||= [];
+    let reaction = message.reactions.find((item) => item.emoji === cleanEmoji);
+    if (!reaction) {
+      reaction = { emoji: cleanEmoji, users: [] };
+      message.reactions.push(reaction);
+    }
+
+    if (reaction.users.includes(currentId)) {
+      reaction.users = reaction.users.filter((id) => id !== currentId);
+    } else {
+      reaction.users.push(currentId);
+    }
+
+    message.reactions = message.reactions.filter((item) => item.users?.length);
+    message.updatedAt = now();
+
+    return hydrateMessage(message, data, currentId);
+  });
+}
+
+export async function getConversationsFor(userId) {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+  const currentUser = data.users.find((user) => user._id === currentId);
+  const conversations = new Map();
+
+  data.messages
+    .filter((message) => message.sender === currentId || message.recipient === currentId)
+    .forEach((message) => {
+      const otherId = message.sender === currentId ? message.recipient : message.sender;
+      const otherUser = data.users.find((user) => user._id === otherId);
+      if (currentUser?.blockedUsers?.includes(otherId) || otherUser?.blockedUsers?.includes(currentId)) return;
+      const existing = conversations.get(otherId);
+      const unread = message.recipient === currentId && !message.readBy?.includes(currentId);
+
+      if (!existing || new Date(message.createdAt) > new Date(existing.lastMessage.createdAt)) {
+        conversations.set(otherId, {
+          user: withRelationship(otherUser, currentId, data),
+          lastMessage: message,
+          unreadCount: (existing?.unreadCount || 0) + (unread ? 1 : 0),
+          pinned: false,
+        });
+      } else if (unread) {
+        existing.unreadCount += 1;
+      }
+    });
+
+  (currentUser?.following || []).forEach((followingId) => {
+    const followingUser = data.users.find((user) => user._id === followingId);
+    if (currentUser?.blockedUsers?.includes(followingId) || followingUser?.blockedUsers?.includes(currentId)) return;
+    if (!conversations.has(followingId)) {
+      conversations.set(followingId, {
+        user: withRelationship(followingUser, currentId, data),
+        lastMessage: null,
+        unreadCount: 0,
+        pinned: false,
+      });
+    }
+  });
+
+  return [...conversations.values()]
+    .filter((conversation) => conversation.user)
+    .sort((a, b) => {
+      if (!a.lastMessage) return 1;
+      if (!b.lastMessage) return -1;
+      return new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt);
+    });
+}
+
+export async function recordCallStarted(call) {
+  return withData(async (data) => {
+    const createdAt = now();
+    const entry = {
+      _id: call.callId,
+      callId: call.callId,
+      caller: call.callerId,
+      callee: call.calleeId,
+      mode: call.mode || "video",
+      status: "ringing",
+      startedAt: createdAt,
+      acceptedAt: null,
+      endedAt: null,
+      durationSeconds: 0,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.callHistory.push(entry);
+    return entry;
+  });
+}
+
+export async function updateCallHistory(callId, updates = {}) {
+  return withData(async (data) => {
+    const entry = data.callHistory.find((item) => item.callId === normalizeId(callId));
+    if (!entry) return null;
+
+    Object.assign(entry, updates, { updatedAt: now() });
+    if (entry.acceptedAt && entry.endedAt) {
+      entry.durationSeconds = Math.max(
+        0,
+        Math.round((new Date(entry.endedAt) - new Date(entry.acceptedAt)) / 1000)
+      );
+    }
+
+    return entry;
+  });
+}
+
+export async function getCallHistoryFor(userId) {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+
+  return data.callHistory
+    .filter((call) => call.caller === currentId || call.callee === currentId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((call) => ({
+      ...call,
+      caller: withRelationship(data.users.find((user) => user._id === call.caller), currentId, data),
+      callee: withRelationship(data.users.find((user) => user._id === call.callee), currentId, data),
+    }));
+}
+
+export async function deleteCallHistoryFor(userId, callId) {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    const before = data.callHistory.length;
+    data.callHistory = data.callHistory.filter(
+      (call) =>
+        !(
+          (call._id === normalizeId(callId) || call.callId === normalizeId(callId)) &&
+          (call.caller === currentId || call.callee === currentId)
+        )
+    );
+
+    if (data.callHistory.length === before) {
+      const error = new Error("Call history item not found");
+      error.status = 404;
+      throw error;
+    }
+
+    return { success: true };
+  });
+}
+
+export async function getFollowersFor(viewerId, profileId, listType = "followers") {
+  const data = await readData();
+  const viewer = data.users.find((user) => user._id === normalizeId(viewerId));
+  const profile = data.users.find((user) => user._id === normalizeId(profileId));
+
+  if (!viewer || !profile) {
+    const error = new Error("User not found");
+    error.status = 404;
+    throw error;
+  }
+
+  const field = listType === "following" ? "following" : "followers";
+  const visibleField = field === "following" ? "showFollowing" : "showFollowers";
+  const canSee =
+    viewer._id === profile._id ||
+    staffRoles.has(viewer.role) ||
+    profile[visibleField] !== false;
+
+  if (!canSee) {
+    const error = new Error(`${field} list is private`);
+    error.status = 403;
+    throw error;
+  }
+
+  const ids = new Set(profile[field] || []);
+  return data.users
+    .filter((user) => ids.has(user._id))
+    .map((user) => withRelationship(user, viewer._id, data));
+}
+
+export async function getNotificationsFor(userId) {
+  const data = await readData();
+  return data.notifications
+    .filter((notification) => notification.userId === normalizeId(userId))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, 50)
+    .map((notification) => ({
+      ...notification,
+      actor: notification.actorId
+        ? withRelationship(data.users.find((user) => user._id === notification.actorId), userId, data)
+        : null,
+    }));
+}
+
+export async function deleteNotificationFor(userId, notificationId) {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    const before = data.notifications.length;
+    data.notifications = data.notifications.filter(
+      (notification) =>
+        !(notification._id === normalizeId(notificationId) && notification.userId === currentId)
+    );
+
+    if (data.notifications.length === before) {
+      const error = new Error("Notification not found");
+      error.status = 404;
+      throw error;
+    }
+
+    return { success: true };
+  });
+}
+
+export async function markNotificationsReadFor(userId) {
+  return withData(async (data) => {
+    const currentId = normalizeId(userId);
+    data.notifications.forEach((notification) => {
+      if (notification.userId === currentId) {
+        notification.read = true;
+        notification.updatedAt = now();
+      }
+    });
+
+    return { success: true };
+  });
+}
+
+export async function createReportFor(reporterId, payload = {}) {
+  return withData(async (data) => {
+    const reporter = data.users.find((user) => user._id === normalizeId(reporterId));
+    if (!reporter) {
+      const error = new Error("Reporter not found");
+      error.status = 404;
+      throw error;
+    }
+
+    requireEmailVerified(reporter, "send reports");
+
+    const targetType = ["user", "post", "comment", "message", "bug"].includes(payload.targetType)
+      ? payload.targetType
+      : null;
+    const targetId = normalizeId(payload.targetId);
+
+    if (!targetType || !targetId) {
+      const error = new Error("Report target is required");
+      error.status = 400;
+      throw error;
+    }
+
+    const existingTarget = summarizeTarget(data, {
+      reporter: reporter._id,
+      targetType,
+      targetId,
+    });
+
+    if (!existingTarget) {
+      const error = new Error("Report target not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const createdAt = now();
+    const report = {
+      _id: crypto.randomUUID(),
+      reporter: reporter._id,
+      targetType,
+      targetId,
+      category: (payload.category || "other").trim().slice(0, 80),
+      severity: ["low", "medium", "high", "critical"].includes(payload.severity) ? payload.severity : "medium",
+      reason: (payload.reason || "Needs review").trim().slice(0, 500),
+      details: (payload.details || "").trim().slice(0, 1000),
+      status: "open",
+      resolution: "",
+      resolvedBy: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.reports.push(report);
+
+    if (targetType === "post") {
+      const post = data.posts.find((item) => item._id === targetId);
+      if (post) post.reportCount = (post.reportCount || 0) + 1;
+    }
+
+    if (targetType === "comment") {
+      const post = data.posts.find((item) => findCommentInPost(item, targetId).comment);
+      const { comment } = post ? findCommentInPost(post, targetId) : {};
+      if (comment) comment.reportCount = (comment.reportCount || 0) + 1;
+    }
+
+    data.users
+      .filter((user) => staffRoles.has(user.role))
+      .forEach((staffUser) => {
+        addNotification(data, staffUser._id, {
+          actorId: reporter._id,
+          type: "report",
+          title: "New report",
+          message: `${reporter.fullName} reported a ${targetType} for ${report.category}.`,
+        });
+      });
+
+    return hydrateReport(report, data);
+  });
+}
+
+export async function resolveReportFor(staffId, reportId, payload = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const report = data.reports.find((item) => item._id === normalizeId(reportId));
+
+    if (!report) {
+      const error = new Error("Report not found");
+      error.status = 404;
+      throw error;
+    }
+
+    report.status = payload.status === "dismissed" ? "dismissed" : "resolved";
+    report.resolution = (payload.resolution || "").trim().slice(0, 1000);
+    report.resolvedBy = staffUser._id;
+    report.updatedAt = now();
+
+    addNotification(data, report.reporter, {
+      actorId: staffUser._id,
+      type: "report-update",
+      title: "Report updated",
+      message: `Your report was marked ${report.status}.`,
+    });
+
+    return hydrateReport(report, data);
+  });
+}
+
+export async function getReportsForUser(userId) {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+  return data.reports
+    .filter((report) => report.reporter === currentId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((report) => hydrateReport(report, data, currentId));
+}
+
+function findAppealableBotAction(data, user, payload = {}, activeBan = null) {
+  if (!user) return null;
+  const actions = data.botActions || [];
+  const botActionId = normalizeId(payload.botActionId || payload.actionId || payload.botReviewActionId);
+  const targetType = ["post", "comment", "message", "user", "account"].includes(payload.targetType)
+    ? payload.targetType
+    : null;
+  const targetId = normalizeId(payload.targetId);
+  const reversibleTypes = new Set(["hide_content", "temp_mute", "restrict", "temp_ban"]);
+
+  const usable = (action) =>
+    action &&
+    action.targetUser === user._id &&
+    action.status === "applied" &&
+    action.appealAllowed !== false &&
+    action.restoreEligible !== false &&
+    action.reversible !== false &&
+    reversibleTypes.has(normalizeBotActionType(action.actionType));
+
+  let action = botActionId ? actions.find((item) => item._id === botActionId) : null;
+
+  if (!action && targetType && targetId) {
+    action = actions.find(
+      (item) =>
+        usable(item) &&
+        item.targetType === (targetType === "account" ? "user" : targetType) &&
+        item.targetId === targetId
+    );
+  }
+
+  if (!action && activeBan?.type === "timed") {
+    action = actions.find(
+      (item) =>
+        usable(item) &&
+        normalizeBotActionType(item.actionType) === "temp_ban" &&
+        item.targetUser === user._id &&
+        (!activeBan.reason || item.reason === activeBan.reason || item.reasonUser === activeBan.reason)
+    );
+  }
+
+  return usable(action) ? action : null;
+}
+
+export async function createAppealFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) {
+      const error = new Error("User not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const activeBan = getActiveModeration(user).ban;
+    const appealedAction = findAppealableBotAction(data, user, payload, activeBan);
+
+    if (!activeBan && !appealedAction) {
+      const error = new Error("You can only appeal while an account ban is active.");
+      error.message = "You can only appeal an active ban or a reversible ModBot action.";
+      error.status = 400;
+      throw error;
+    }
+
+    const openAppeal = data.appeals.find(
+      (appeal) =>
+        appeal.user === user._id &&
+        ["open", "reviewing"].includes(appeal.status) &&
+        (appealedAction
+          ? appeal.botActionId === appealedAction._id
+          : !appeal.botActionId && appeal.banIssuedAt === activeBan?.issuedAt)
+    );
+    if (openAppeal) {
+      const error = new Error("You already have an open appeal for this action.");
+      error.status = 409;
+      throw error;
+    }
+
+    const text = (payload.text || "").trim();
+    if (!text) {
+      const error = new Error("Appeal text is required");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    const appeal = {
+      _id: crypto.randomUUID(),
+      user: user._id,
+      text: text.slice(0, 1200),
+      status: "open",
+      type: appealedAction ? "bot-action" : "ban",
+      response: "",
+      resolvedBy: null,
+      targetType: appealedAction?.targetType || "account",
+      targetId: appealedAction?.targetId || user._id,
+      botActionId: appealedAction?._id || null,
+      botActionType: appealedAction?.actionType || null,
+      botActionReason: appealedAction?.reasonUser || appealedAction?.reason || "",
+      banType: activeBan?.type || (appealedAction?.actionType === "temp_ban" ? "timed" : null),
+      banReason: activeBan?.reason || "",
+      banIssuedAt: activeBan?.issuedAt || null,
+      banUntil: activeBan?.until || null,
+      banDays: activeBan?.days || null,
+      requiresAdminUnban: activeBan?.requiresAdminUnban || false,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.appeals.push(appeal);
+    data.users
+      .filter((staffUser) => staffRoles.has(staffUser.role))
+      .forEach((staffUser) => {
+        addNotification(data, staffUser._id, {
+          actorId: user._id,
+          type: "appeal",
+          title: "New appeal",
+          message: `${user.fullName} submitted an account appeal.`,
+        });
+      });
+
+    return hydrateAppeal(appeal, data);
+  });
+}
+
+export async function getAppealsForUser(userId) {
+  const data = await readData();
+  const currentId = normalizeId(userId);
+  return data.appeals
+    .filter((appeal) => appeal.user === currentId)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((appeal) => hydrateAppeal(appeal, data));
+}
+
+export async function resolveAppealFor(staffId, appealId, payload = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const appeal = data.appeals.find((item) => item._id === normalizeId(appealId));
+
+    if (!appeal) {
+      const error = new Error("Appeal not found");
+      error.status = 404;
+      throw error;
+    }
+
+    appeal.status = payload.status === "approved" ? "approved" : "denied";
+    appeal.response = (payload.response || "").trim().slice(0, 1000);
+    appeal.resolvedBy = staffUser._id;
+    appeal.updatedAt = now();
+
+    const targetUser = data.users.find((user) => user._id === appeal.user);
+    const appealedAction = appeal.botActionId
+      ? (data.botActions || []).find((action) => action._id === appeal.botActionId)
+      : null;
+    if (targetUser?.fullBannedAt && !adminRoles.has(staffUser.role)) {
+      const error = new Error("Only admins can resolve full-ban appeals.");
+      error.status = 403;
+      throw error;
+    }
+
+    if (appeal.status === "approved" && appealedAction?.status === "applied") {
+      undoBotActionInData(
+        data,
+        staffUser,
+        appealedAction,
+        appeal.response || payload.response || "Appeal approved by staff.",
+        "user"
+      );
+    } else if (appeal.status === "approved" && targetUser && !appeal.botActionId) {
+      targetUser.bannedUntil = null;
+      targetUser.banReason = "";
+      targetUser.banIssuedAt = null;
+      targetUser.banDays = null;
+      targetUser.fullBannedAt = null;
+      targetUser.fullBanReason = "";
+      targetUser.fullBanBy = null;
+      targetUser.updatedAt = now();
+    }
+
+    addNotification(data, appeal.user, {
+      actorId: staffUser._id,
+      type: "appeal-update",
+      title: "Appeal reviewed",
+      message: `Your appeal was ${appeal.status}.`,
+    });
+
+    return hydrateAppeal(appeal, data);
+  });
+}
+
+export async function applyModerationActionFor(staffId, targetUserId, payload = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const targetUser = data.users.find((user) => user._id === normalizeId(targetUserId));
+
+    if (!targetUser) {
+      const error = new Error("Target user not found");
+      error.status = 404;
+      throw error;
+    }
+
+    if (!canModerateTarget(staffUser, targetUser)) {
+      const error = new Error("You cannot moderate this account");
+      error.status = 403;
+      throw error;
+    }
+
+    const type = payload.type || "messageBan";
+    const days = Math.max(1, Math.min(365, Number(payload.days) || 7));
+    const reason = (payload.reason || "Community safety").trim().slice(0, 500);
+    const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    const createdAt = now();
+    const roleActions = new Set([
+      "makeMod",
+      "removeMod",
+      "makeAdmin",
+      "removeAdmin",
+      "verifyEmail",
+      "unverifyEmail",
+      "grantVerified",
+      "removeVerified",
+      "grantFeatured",
+      "removeFeatured",
+      "grantLanguagePro",
+      "removeLanguagePro",
+      "clearModerationRecords",
+      "clearReportHistory",
+      "clearAppealHistory",
+      "deleteUserPosts",
+      "deleteUserReposts",
+      "resetProfilePhoto",
+    ]);
+    const adminOnlyActions = new Set([...roleActions, "fullBan", "clearFullBan", "clearBan"]);
+    const adminProtectedActions = new Set([
+      "removeAdmin",
+      "ban",
+      "fullBan",
+      "messageBan",
+      "shadowBan",
+      "unverifyEmail",
+      "deleteUserPosts",
+      "deleteUserReposts",
+      "resetProfilePhoto",
+    ]);
+
+    if (adminOnlyActions.has(type) && !adminRoles.has(staffUser.role)) {
+      const error = new Error("Only admins can change roles, account bans, emails, or verification badges.");
+      error.status = 403;
+      throw error;
+    }
+
+    if (targetUser.role === "admin" && adminProtectedActions.has(type)) {
+      const error = new Error("Admin accounts are protected. Nobody can demote, ban, or take out an admin from the panel.");
+      error.status = 403;
+      throw error;
+    }
+
+    if (type === "ban") {
+      targetUser.bannedUntil = until;
+      targetUser.banReason = reason;
+      targetUser.banIssuedAt = createdAt;
+      targetUser.banDays = days;
+    } else if (type === "fullBan") {
+      targetUser.fullBannedAt = createdAt;
+      targetUser.fullBanReason = reason;
+      targetUser.fullBanBy = staffUser._id;
+      targetUser.bannedUntil = null;
+      targetUser.banReason = "";
+      targetUser.banIssuedAt = null;
+      targetUser.banDays = null;
+    } else if (type === "messageBan") {
+      targetUser.messageBanUntil = until;
+      targetUser.messageBanReason = reason;
+    } else if (type === "shadowBan") {
+      targetUser.shadowBannedUntil = until;
+      targetUser.shadowBanReason = reason;
+    } else if (type === "clearBan") {
+      targetUser.bannedUntil = null;
+      targetUser.banReason = "";
+      targetUser.banIssuedAt = null;
+      targetUser.banDays = null;
+    } else if (type === "clearFullBan") {
+      targetUser.fullBannedAt = null;
+      targetUser.fullBanReason = "";
+      targetUser.fullBanBy = null;
+    } else if (type === "clearMessageBan") {
+      targetUser.messageBanUntil = null;
+      targetUser.messageBanReason = "";
+    } else if (type === "clearShadowBan") {
+      targetUser.shadowBannedUntil = null;
+      targetUser.shadowBanReason = "";
+    } else if (type === "makeMod") {
+      targetUser.role = "mod";
+    } else if (type === "removeMod" && targetUser.role === "mod") {
+      targetUser.role = "user";
+    } else if (type === "makeAdmin") {
+      targetUser.role = "admin";
+    } else if (type === "removeAdmin" && targetUser.role === "admin") {
+      targetUser.role = "user";
+    } else if (type === "verifyEmail") {
+      targetUser.emailVerified = true;
+      targetUser.emailVerifiedAt = now();
+      targetUser.emailVerificationCodeHash = null;
+      targetUser.emailVerificationExpiresAt = null;
+    } else if (type === "unverifyEmail") {
+      targetUser.emailVerified = false;
+      targetUser.emailVerifiedAt = null;
+    } else if (type === "grantVerified") {
+      targetUser.verifiedBadgeOverride = true;
+      targetUser.verifiedBadgeBlocked = false;
+    } else if (type === "removeVerified") {
+      targetUser.verifiedBadgeOverride = false;
+      targetUser.verifiedBadgeBlocked = true;
+    } else if (type === "grantFeatured") {
+      targetUser.customBadges ||= [];
+      if (!targetUser.customBadges.includes("featured")) targetUser.customBadges.push("featured");
+    } else if (type === "removeFeatured") {
+      targetUser.customBadges = (targetUser.customBadges || []).filter((badge) => badge !== "featured");
+    } else if (type === "grantLanguagePro") {
+      targetUser.customBadges ||= [];
+      if (!targetUser.customBadges.includes("languagePro")) targetUser.customBadges.push("languagePro");
+    } else if (type === "removeLanguagePro") {
+      targetUser.customBadges = (targetUser.customBadges || []).filter((badge) => badge !== "languagePro");
+    } else if (type === "warn") {
+      addNotification(data, targetUser._id, {
+        actorId: staffUser._id,
+        type: "warning",
+        title: "Account warning",
+        message: reason,
+      });
+    } else if (type === "clearModerationRecords") {
+      targetUser.moderationRecords = [];
+    } else if (type === "clearReportHistory") {
+      data.reports = data.reports.filter(
+        (report) =>
+          report.reporter !== targetUser._id &&
+          report.targetUser !== targetUser._id &&
+          report.targetId !== targetUser._id &&
+          report.user !== targetUser._id &&
+          report.userId !== targetUser._id
+      );
+    } else if (type === "clearAppealHistory") {
+      data.appeals = data.appeals.filter(
+        (appeal) =>
+          appeal.user !== targetUser._id &&
+          appeal.userId !== targetUser._id &&
+          appeal.targetUser !== targetUser._id
+      );
+      data.botAppealReviews = (data.botAppealReviews || []).filter(
+        (review) =>
+          review.user !== targetUser._id &&
+          review.userId !== targetUser._id &&
+          review.targetUser !== targetUser._id
+      );
+    } else if (type === "deleteUserPosts") {
+      const ownedPostIds = new Set(data.posts.filter((post) => post.author === targetUser._id && !post.repostOf).map((post) => post._id));
+      data.posts = data.posts.filter((post) => post.author !== targetUser._id || post.repostOf);
+      data.posts = data.posts.filter((post) => !ownedPostIds.has(post.repostOf));
+    } else if (type === "deleteUserReposts") {
+      data.posts = data.posts.filter((post) => !(post.author === targetUser._id && post.repostOf));
+    } else if (type === "resetProfilePhoto") {
+      targetUser.profilePic = makeLocalAvatar(targetUser.fullName);
+    } else {
+      const error = new Error("Unknown moderation action");
+      error.status = 400;
+      throw error;
+    }
+
+    const action = {
+      _id: crypto.randomUUID(),
+      staff: staffUser._id,
+      targetUser: targetUser._id,
+      type,
+      reason,
+      days: ["ban", "messageBan", "shadowBan"].includes(type) ? days : null,
+      until: ["ban", "messageBan", "shadowBan"].includes(type) ? until : null,
+      createdAt,
+    };
+
+    targetUser.moderationRecords ||= [];
+    targetUser.moderationRecords.push(action);
+    targetUser.updatedAt = createdAt;
+    data.moderationActions.push(action);
+
+    addNotification(data, targetUser._id, {
+      actorId: staffUser._id,
+      type: "moderation",
+      title: "Account moderation update",
+      message: `${type} applied: ${reason}`,
+    });
+
+    return {
+      action: hydrateModerationAction(action, data),
+      user: publicUser(targetUser),
+    };
+  });
+}
+
+export async function sendStaffNotificationFor(staffId, targetUserId, payload = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const targetUser = data.users.find((user) => user._id === normalizeId(targetUserId));
+
+    if (!targetUser) {
+      const error = new Error("Target user not found");
+      error.status = 404;
+      throw error;
+    }
+
+    const notification = addNotification(data, targetUser._id, {
+      actorId: staffUser._id,
+      type: "staff-message",
+      title: (payload.title || "Message from moderation").trim().slice(0, 120),
+      message: (payload.message || "").trim().slice(0, 1200),
+    });
+
+    const outreachEvent = {
+      _id: crypto.randomUUID(),
+      staff: staffUser._id,
+      targetUser: targetUser._id,
+      title: notification.title,
+      message: notification.message,
+      emailRequested: payload.email !== false,
+      createdAt: now(),
+    };
+
+    data.outreachEvents.unshift(outreachEvent);
+    data.outreachEvents.splice(100);
+
+    return {
+      notification,
+      outreachEvent,
+      user: publicUser(targetUser),
+      staff: publicUser(staffUser),
+    };
+  });
+}
+
+export async function getReportedAlgorithmPostsFor(staffId) {
+  const data = await readData();
+  requireStaff(data, staffId);
+  return data.posts
+    .filter((post) => (post.reportCount || 0) > 0)
+    .sort((a, b) => (b.reportCount || 0) - (a.reportCount || 0))
+    .map((post) => hydratePost(post, data, staffId));
+}
+
+export async function getSpammyPostsFor(staffId) {
+  const data = await readData();
+  requireStaff(data, staffId);
+  return data.posts
+    .filter((post) => (post.spamScore || 0) >= 20 || (post.hashtags || []).length > env.MAX_HASHTAGS_PER_POST)
+    .sort((a, b) => (b.spamScore || 0) - (a.spamScore || 0))
+    .map((post) => hydratePost(post, data, staffId));
+}
+
+export async function moderatePostRankingFor(staffId, postId, action = "downrank", reason = "Moderation ranking action") {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const post = data.posts.find((item) => item._id === normalizeId(postId));
+    if (!post) throw Object.assign(new Error("Post not found"), { status: 404 });
+
+    if (action === "remove-from-feed") {
+      post.removedFromFeed = true;
+      post.spamScore = Math.max(post.spamScore || 0, 90);
+    } else {
+      post.downranked = true;
+      post.qualityScore = Math.max(0, (post.qualityScore || 60) - 25);
+      post.spamScore = Math.max(post.spamScore || 0, 45);
+    }
+    post.updatedAt = now();
+    data.moderationActions.push({
+      _id: crypto.randomUUID(),
+      staff: staffUser._id,
+      targetUser: post.author,
+      type: action,
+      reason,
+      days: null,
+      until: null,
+      createdAt: now(),
+    });
+    return hydratePost(post, data, staffId);
+  });
+}
+
+export async function setHashtagBlockFor(staffId, tagName, blocked = true) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const normalizedName = normalizeHashtag(tagName);
+    if (!normalizedName) throw Object.assign(new Error("Hashtag is required"), { status: 400 });
+    let tag = data.hashtags.find((item) => item.normalizedName === normalizedName);
+    if (!tag) {
+      tag = {
+        _id: crypto.randomUUID(),
+        name: normalizedName,
+        normalizedName,
+        postCount: 0,
+        dailyPostCount: 0,
+        weeklyPostCount: 0,
+        trendingScore: 0,
+        category: "general",
+        language: "all",
+        blocked,
+        lastUsedAt: now(),
+        createdAt: now(),
+        updatedAt: now(),
+      };
+      data.hashtags.push(tag);
+    }
+    tag.blocked = Boolean(blocked);
+    tag.updatedAt = now();
+    data.blockedHashtags = data.hashtags.filter((item) => item.blocked).map((item) => item.normalizedName);
+    data.moderationActions.push({
+      _id: crypto.randomUUID(),
+      staff: staffUser._id,
+      targetUser: staffUser._id,
+      type: blocked ? "blockHashtag" : "unblockHashtag",
+      reason: `#${normalizedName}`,
+      days: null,
+      until: null,
+      createdAt: now(),
+    });
+    return tag;
+  });
+}
+
+export async function getBotTrainingFor(userId) {
+  const data = await readData();
+  requireAdmin(data, userId);
+  return clone(data.botTraining);
+}
+
+export async function updateBotTrainingFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const adminUser = requireAdmin(data, userId);
+    const fields = ["rules", "moderationTone", "languagePractice", "escalation", "blockedTopics"];
+    const nextConfig = { ...data.botTraining };
+
+    fields.forEach((field) => {
+      if (payload[field] !== undefined) {
+        nextConfig[field] = payload[field].toString().trim().slice(0, 1600);
+      }
+    });
+
+    data.botTraining = nextConfig;
+    data.moderationActions.push({
+      _id: crypto.randomUUID(),
+      staff: adminUser._id,
+      targetUser: adminUser._id,
+      type: "botTrainingUpdate",
+      reason: "Updated local ModBot training configuration",
+      days: null,
+      until: null,
+      createdAt: now(),
+    });
+
+    return clone(data.botTraining);
+  });
+}
+
+function effectiveBotSettings(data) {
+  const stored = {
+    ...initialData.botSettings,
+    ...(data.botSettings || {}),
+  };
+  const highConfidenceAction =
+    ["report", "escalate", "temp_ban"].includes(stored.highConfidenceAction) &&
+    env.BOT_HIGH_CONFIDENCE_ACTION !== stored.highConfidenceAction
+      ? env.BOT_HIGH_CONFIDENCE_ACTION
+      : stored.highConfidenceAction;
+  const criticalConfidenceAction =
+    stored.criticalConfidenceAction === "escalate" && env.BOT_CRITICAL_CONFIDENCE_ACTION !== "escalate"
+      ? env.BOT_CRITICAL_CONFIDENCE_ACTION
+      : stored.criticalConfidenceAction;
+
+  return {
+    ...stored,
+    highConfidenceAction: normalizeBotActionType(highConfidenceAction),
+    criticalConfidenceAction: normalizeBotActionType(criticalConfidenceAction),
+    enabled: Boolean(stored.enabled && env.BOT_ENGINE_ENABLED),
+    localAIEnabled: Boolean(stored.localAIEnabled && env.BOT_LOCAL_AI_ENABLED),
+    scanPosts: Boolean(stored.scanPosts && env.BOT_SCAN_POSTS),
+    scanComments: Boolean(stored.scanComments && env.BOT_SCAN_COMMENTS),
+    scanMessages: Boolean(stored.scanMessages && env.BOT_SCAN_MESSAGES),
+    scanImages: Boolean(env.BOT_SCAN_IMAGES && (stored.scanImages !== false || env.BOT_SCAN_IMAGES)),
+    scanReports: Boolean(stored.scanReports && env.BOT_SCAN_REPORTS),
+    scanAppeals: Boolean(stored.scanAppeals && env.BOT_SCAN_APPEALS),
+    allowAutoActions: Boolean(stored.allowAutoActions && env.ALLOW_BOT_AUTO_ACTIONS),
+    createReports: Boolean(stored.createReports && env.BOT_CAN_CREATE_REPORTS),
+    warnUsers: Boolean(stored.warnUsers && env.BOT_CAN_WARN),
+    autoHideHighConfidence: Boolean(stored.autoHideHighConfidence && env.BOT_CAN_HIDE_CONTENT),
+    autoMuteCritical: Boolean(stored.autoMuteCritical && env.BOT_CAN_TEMP_MUTE),
+    autoTempBanCritical: Boolean((stored.autoTempBanCritical || env.BOT_AUTO_TEMP_BAN_CRITICAL) && env.BOT_CAN_TEMP_BAN),
+    autoFollowBack: Boolean(stored.autoFollowBack && env.BOT_AUTO_FOLLOW_BACK_ENABLED),
+    thankFollowEnabled: Boolean(stored.thankFollowEnabled && env.BOT_THANK_FOLLOW_ENABLED),
+    randomCommentEnabled: Boolean(stored.randomCommentEnabled && env.BOT_RANDOM_COMMENT_ENABLED),
+    allowModelReply: Boolean(stored.allowModelReply && env.BOT_ALLOW_MODEL_REPLY),
+    maxMuteMinutes: Math.max(1, Math.min(env.BOT_MAX_MUTE_MINUTES, Number(stored.maxMuteMinutes || env.BOT_MAX_MUTE_MINUTES))),
+    actionCooldownMs: Math.max(5000, Number(stored.actionCooldownMs || env.BOT_ACTION_COOLDOWN_MS)),
+    maxActionsPerUserPerHour: Math.max(1, Number(stored.maxActionsPerUserPerHour || env.BOT_MAX_ACTIONS_PER_USER_PER_HOUR)),
+  };
+}
+
+function hydrateBotAction(action, data) {
+  if (!action) return null;
+  return {
+    ...action,
+    actorUser: publicUser(data.users.find((user) => user._id === action.actorUser)),
+    targetUser: publicUser(data.users.find((user) => user._id === action.targetUser)),
+    bot: publicUser(data.users.find((user) => user._id === action.bot)),
+    reviewedBy: action.reviewedBy
+      ? publicUser(data.users.find((user) => user._id === action.reviewedBy))
+      : null,
+    undoneBy: action.undoneBy
+      ? publicUser(data.users.find((user) => user._id === action.undoneBy))
+      : null,
+  };
+}
+
+function getTargetUserId(data, targetType, targetId, fallbackUserId = null) {
+  const normalizedTarget = normalizeId(targetId);
+  if (targetType === "user") return normalizedTarget;
+  if (targetType === "post") return data.posts.find((post) => post._id === normalizedTarget)?.author || fallbackUserId;
+  if (targetType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, normalizedTarget).comment);
+    const found = post ? findCommentInPost(post, normalizedTarget).comment : null;
+    return found?.author || fallbackUserId;
+  }
+  if (targetType === "message") {
+    const message = data.messages.find((item) => item._id === normalizedTarget);
+    return message?.sender || fallbackUserId;
+  }
+  return fallbackUserId;
+}
+
+function botActionFromSeverity(severity, settings) {
+  if (severity === "critical") return settings.criticalConfidenceAction || env.BOT_CRITICAL_CONFIDENCE_ACTION;
+  if (severity === "high") return settings.highConfidenceAction || env.BOT_HIGH_CONFIDENCE_ACTION;
+  if (severity === "medium") return settings.mediumConfidenceAction || env.BOT_MEDIUM_CONFIDENCE_ACTION;
+  if (severity === "low") return settings.lowConfidenceAction || env.BOT_LOW_CONFIDENCE_ACTION;
+  return "log";
+}
+
+function normalizeBotActionType(actionType = "log") {
+  const value = actionType.toString().trim().toLowerCase().replace(/-/g, "_");
+  const map = {
+    notice: "warn",
+    warning: "warn",
+    create_report: "report",
+    mod_review: "escalate",
+    staff_review: "escalate",
+    hide: "hide_content",
+    remove: "hide_content",
+    mute: "temp_mute",
+    temporary_ban: "temp_ban",
+    timed_ban: "temp_ban",
+    tempban: "temp_ban",
+    temp_restrict: "restrict",
+    none: "log",
+    noop: "log",
+  };
+  return map[value] || value;
+}
+
+function createBotAudit(data, payload = {}) {
+  const createdAt = now();
+  const audit = {
+    _id: crypto.randomUUID(),
+    actorId: payload.actorId || null,
+    actorType: payload.actorType || "bot",
+    action: payload.action || "bot_event",
+    targetType: payload.targetType || null,
+    targetId: payload.targetId || null,
+    reason: payload.reason || "",
+    result: payload.result || "logged",
+    meta: payload.meta || {},
+    createdAt,
+  };
+  data.botAuditLogs.unshift(audit);
+  data.botAuditLogs.splice(500);
+  data.moderationLogs ||= [];
+  data.moderationLogs.push(audit);
+  return audit;
+}
+
+function userBotActionsInWindow(data, targetUserId, windowMs = 60 * 60 * 1000) {
+  const since = Date.now() - windowMs;
+  return (data.botActions || []).filter(
+    (action) =>
+      action.targetUser === targetUserId &&
+      new Date(action.createdAt).getTime() >= since &&
+      !["rejected", "undone"].includes(action.status)
+  );
+}
+
+function recentSimilarBotAction(data, targetUserId, actionType, cooldownMs) {
+  const since = Date.now() - Number(cooldownMs || env.BOT_ACTION_COOLDOWN_MS);
+  return (data.botActions || []).find(
+    (action) =>
+      action.targetUser === targetUserId &&
+      action.actionType === actionType &&
+      new Date(action.createdAt).getTime() >= since &&
+      !["rejected", "undone"].includes(action.status)
+  );
+}
+
+function makeBotReport(data, action, botUser) {
+  if (!["user", "post", "comment", "message", "bug"].includes(action.targetType)) return null;
+  const targetId = normalizeId(action.targetId);
+  if (!targetId || !summarizeTarget(data, { reporter: botUser._id, targetType: action.targetType, targetId }, botUser._id)) {
+    return null;
+  }
+
+  const createdAt = now();
+  const report = {
+    _id: crypto.randomUUID(),
+    reporter: botUser._id,
+    targetType: action.targetType,
+    targetId,
+    category: action.category || "bot-review",
+    reason: action.reason || "MEDIA ModBot flagged this for review.",
+    details: action.details || "",
+    status: "open",
+    resolution: "",
+    resolvedBy: null,
+    botActionId: action._id,
+    createdAt,
+    updatedAt: createdAt,
+  };
+
+  data.reports.push(report);
+  data.botReports.unshift(report._id);
+  data.botReports.splice(500);
+
+  if (action.targetType === "post") {
+    const post = data.posts.find((item) => item._id === targetId);
+    if (post) post.reportCount = (post.reportCount || 0) + 1;
+  }
+
+  if (action.targetType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, targetId).comment);
+    const { comment } = post ? findCommentInPost(post, targetId) : {};
+    if (comment) comment.reportCount = (comment.reportCount || 0) + 1;
+  }
+
+  data.users
+    .filter((user) => staffRoles.has(user.role))
+    .forEach((staffUser) => {
+      addNotification(data, staffUser._id, {
+        actorId: botUser._id,
+        type: "bot-report",
+        title: "ModBot needs review",
+        message: `MEDIA ModBot flagged a ${action.targetType}: ${action.reason}`,
+      });
+    });
+
+  return report;
+}
+
+function hideBotContentTarget(data, action) {
+  if (action.targetType === "post") {
+    const post = data.posts.find((item) => item._id === action.targetId);
+    if (!post) return false;
+    return markBotHiddenTarget(post, action, { removedFromFeed: true });
+  }
+
+  if (action.targetType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, action.targetId).comment);
+    const { comment } = post ? findCommentInPost(post, action.targetId) : {};
+    if (!comment) return false;
+    return markBotHiddenTarget(comment, action);
+  }
+
+  if (action.targetType === "message") {
+    const message = data.messages.find((item) => item._id === action.targetId);
+    if (!message) return false;
+    return markBotHiddenTarget(message, action);
+  }
+
+  return false;
+}
+
+function unhideBotContentTarget(data, action) {
+  if (action.targetType === "post") {
+    const post = data.posts.find((item) => item._id === action.targetId);
+    if (!post) return false;
+    return clearBotHiddenTarget(post, { removedFromFeed: false });
+  }
+
+  if (action.targetType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, action.targetId).comment);
+    const { comment } = post ? findCommentInPost(post, action.targetId) : {};
+    if (!comment) return false;
+    return clearBotHiddenTarget(comment);
+  }
+
+  if (action.targetType === "message") {
+    const message = data.messages.find((item) => item._id === action.targetId);
+    if (!message) return false;
+    return clearBotHiddenTarget(message);
+  }
+
+  return false;
+}
+
+function applyStoredBotAction(data, action, actorUser) {
+  const targetUser = data.users.find((user) => user._id === action.targetUser);
+  const botUser = data.users.find((user) => user._id === action.bot) || getBotUser(data);
+  const effects = [];
+  const actionType = normalizeBotActionType(action.actionType);
+
+  if (!targetUser && action.targetType !== "bug") return { applied: false, result: "target_missing", effects };
+  if (adminRoles.has(targetUser?.role) && ["temp_mute", "restrict", "hide_content", "temp_ban"].includes(actionType)) {
+    return { applied: false, result: "admin_protected", effects };
+  }
+
+  if (actionType === "warn") {
+    if (!env.BOT_CAN_WARN) return { applied: false, result: "warn_disabled", effects };
+    targetUser.botWarningCount = Number(targetUser.botWarningCount || 0) + 1;
+    addNotification(data, targetUser._id, {
+      actorId: botUser?._id || actorUser?._id || null,
+      type: "bot-warning",
+      title: "MEDIA ModBot notice",
+      message: action.reason || "Please keep Better Media safe and respectful.",
+    });
+    effects.push("notification");
+  } else if (actionType === "report") {
+    if (!env.BOT_CAN_CREATE_REPORTS) return { applied: false, result: "report_disabled", effects };
+    const report = makeBotReport(data, action, botUser);
+    if (report) effects.push(`report:${report._id}`);
+  } else if (actionType === "escalate") {
+    if (env.BOT_CAN_CREATE_REPORTS) {
+      const report = makeBotReport(data, action, botUser);
+      if (report) effects.push(`report:${report._id}`);
+    }
+    data.users
+      .filter((user) => staffRoles.has(user.role))
+      .forEach((staffUser) => {
+        addNotification(data, staffUser._id, {
+          actorId: botUser?._id || actorUser?._id || null,
+          type: "bot-escalation",
+          title: "ModBot escalation",
+          message: action.reason || "MEDIA ModBot escalated content for staff review.",
+        });
+      });
+    effects.push("staff-notification");
+  } else if (actionType === "hide_content") {
+    if (!env.BOT_CAN_HIDE_CONTENT) return { applied: false, result: "hide_disabled", effects };
+    if (!hideBotContentTarget(data, action)) return { applied: false, result: "content_missing", effects };
+    effects.push("hidden-content");
+  } else if (actionType === "temp_mute") {
+    if (!env.BOT_CAN_TEMP_MUTE) return { applied: false, result: "mute_disabled", effects };
+    const minutes = Math.max(1, Math.min(env.BOT_MAX_MUTE_MINUTES, Number(action.minutes || env.BOT_SPAM_MUTE_MINUTES)));
+    targetUser.messageBanUntil = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+    targetUser.messageBanReason = action.reason || "Temporary ModBot safety mute";
+    targetUser.botMuteCount = Number(targetUser.botMuteCount || 0) + 1;
+    data.botPunishments.unshift({
+      _id: crypto.randomUUID(),
+      botActionId: action._id,
+      targetUser: targetUser._id,
+      type: "temp_mute",
+      until: targetUser.messageBanUntil,
+      reason: targetUser.messageBanReason,
+      createdAt: now(),
+    });
+    data.botPunishments.splice(500);
+    addNotification(data, targetUser._id, {
+      actorId: botUser?._id || actorUser?._id || null,
+      type: "bot-action",
+      title: "Messaging temporarily muted",
+      message: `MEDIA ModBot muted messaging for ${minutes} minute${minutes === 1 ? "" : "s"}. Reason: ${targetUser.messageBanReason}`,
+    });
+    effects.push("message-ban");
+    if (env.BOT_CAN_HIDE_CONTENT && hideBotContentTarget(data, action)) {
+      effects.push("hidden-content");
+    }
+  } else if (actionType === "restrict") {
+    if (!env.BOT_CAN_TEMP_RESTRICT) return { applied: false, result: "restrict_disabled", effects };
+    const minutes = Math.max(1, Math.min(env.BOT_MAX_MUTE_MINUTES, Number(action.minutes || env.BOT_SPAM_MUTE_MINUTES)));
+    const until = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+    targetUser.botRestriction = {
+      postUntil: until,
+      commentUntil: until,
+      messageUntil: until,
+      reason: action.reason || "Temporary ModBot safety restriction",
+      issuedAt: now(),
+    };
+    data.botPunishments.unshift({
+      _id: crypto.randomUUID(),
+      botActionId: action._id,
+      targetUser: targetUser._id,
+      type: "restrict",
+      until,
+      reason: targetUser.botRestriction.reason,
+      createdAt: now(),
+    });
+    data.botPunishments.splice(500);
+    addNotification(data, targetUser._id, {
+      actorId: botUser?._id || actorUser?._id || null,
+      type: "bot-action",
+      title: "Account features temporarily restricted",
+      message: `Posting, commenting, and messaging are restricted for ${minutes} minute${minutes === 1 ? "" : "s"}. Reason: ${targetUser.botRestriction.reason}`,
+    });
+    effects.push("bot-restriction");
+    if (env.BOT_CAN_HIDE_CONTENT && hideBotContentTarget(data, action)) {
+      effects.push("hidden-content");
+    }
+  } else if (actionType === "temp_ban") {
+    if (!env.BOT_CAN_TEMP_BAN) return { applied: false, result: "temp_ban_disabled", effects };
+    const minutes = Math.max(1, Math.min(env.BOT_MAX_TEMP_BAN_MINUTES, Number(action.minutes || env.BOT_CRITICAL_TEMP_BAN_MINUTES)));
+    targetUser.bannedUntil = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+    targetUser.banIssuedAt = now();
+    targetUser.banDays = Number((minutes / 1440).toFixed(3));
+    targetUser.banReason = action.reason || "Temporary ModBot safety ban";
+    targetUser.botTempBanCount = Number(targetUser.botTempBanCount || 0) + 1;
+    data.botPunishments.unshift({
+      _id: crypto.randomUUID(),
+      botActionId: action._id,
+      targetUser: targetUser._id,
+      type: "temp_ban",
+      until: targetUser.bannedUntil,
+      reason: targetUser.banReason,
+      createdAt: now(),
+    });
+    data.botPunishments.splice(500);
+    addNotification(data, targetUser._id, {
+      actorId: botUser?._id || actorUser?._id || null,
+      type: "bot-action",
+      title: "Account temporarily banned",
+      message: `MEDIA ModBot temporarily banned this account for ${minutes} minute${minutes === 1 ? "" : "s"}. Reason: ${targetUser.banReason}`,
+    });
+    effects.push("timed-ban");
+
+    if (env.BOT_CAN_HIDE_CONTENT && hideBotContentTarget(data, action)) {
+      effects.push("hidden-content");
+    }
+  } else {
+    return { applied: true, result: "logged", effects };
+  }
+
+  if (targetUser) {
+    targetUser.moderationRecords ||= [];
+    targetUser.moderationRecords.push({
+      _id: crypto.randomUUID(),
+      staff: botUser?._id || actorUser?._id || null,
+      targetUser: targetUser._id,
+      type: `bot:${actionType}`,
+      reason: action.reason,
+      days: null,
+      until: targetUser.bannedUntil || targetUser.messageBanUntil || targetUser.botRestriction?.messageUntil || null,
+      createdAt: now(),
+    });
+    targetUser.updatedAt = now();
+  }
+
+  return { applied: true, result: effects.length ? effects.join(",") : "applied", effects };
+}
+
+export async function getBotProfileFor(viewerId = null) {
+  const data = await readData();
+  const bot = getBotUser(data);
+  const settings = effectiveBotSettings(data);
+  return {
+    profile: withRelationship(bot, viewerId, data),
+    settings: {
+      enabled: settings.enabled,
+      scanPosts: settings.scanPosts,
+      scanComments: settings.scanComments,
+      scanMessages: settings.scanMessages,
+      localAIEnabled: settings.localAIEnabled,
+      allowModelReply: settings.allowModelReply,
+      autoFollowBack: settings.autoFollowBack,
+      thankFollowEnabled: settings.thankFollowEnabled,
+      randomCommentEnabled: settings.randomCommentEnabled,
+      allowAutoActions: settings.allowAutoActions,
+    },
+    training: data.botTraining,
+    health: buildBotHealth(data),
+  };
+}
+
+function buildBotHealth(data) {
+  const settings = effectiveBotSettings(data);
+  const pendingActions = (data.botActions || []).filter((action) => action.status === "needs_review").length;
+  const appliedActions = (data.botActions || []).filter((action) => action.status === "applied").length;
+  const bot = getBotUser(data);
+  return {
+    enabled: settings.enabled,
+    localAIEnabled: settings.localAIEnabled,
+    profileReady: Boolean(bot),
+    queueBackedBy: env.REDIS_ENABLED ? "redis-or-fallback" : "memory-local",
+    modelProvider: env.OLLAMA_ENABLED
+      ? "ollama-local"
+      : env.BOT_LOCAL_AI_ENABLED
+        ? "local-fallback-huggingface-ready"
+        : "rules-only",
+    ollama: {
+      enabled: env.OLLAMA_ENABLED,
+      baseUrl: env.OLLAMA_BASE_URL,
+      model: env.OLLAMA_MODEL,
+      routing: modelRoutingSummary(),
+      timeoutMs: env.OLLAMA_TIMEOUT_MS,
+      visionEnabled: env.OLLAMA_VISION_ENABLED,
+      visionTimeoutMs: env.OLLAMA_VISION_TIMEOUT_MS,
+      modelHealth: getOllamaHealthCache(),
+    },
+    modelLocalFilesOnly: env.BOT_LOCAL_FILES_ONLY,
+    textModel: env.BOT_TEXT_MODEL,
+    replyModel: env.BOT_REPLY_MODEL,
+    imageModel: env.BOT_IMAGE_MODEL || null,
+    localAI: getLocalAIStatus(),
+    social: {
+      autoFollowBack: settings.autoFollowBack,
+      thankFollowEnabled: settings.thankFollowEnabled,
+      randomCommentEnabled: settings.randomCommentEnabled,
+      allowModelReply: settings.allowModelReply,
+    },
+    moderationPowers: {
+      autoActions: settings.allowAutoActions,
+      warnUsers: settings.warnUsers,
+      createReports: settings.createReports,
+      tempMute: env.BOT_CAN_TEMP_MUTE,
+      tempRestrict: env.BOT_CAN_TEMP_RESTRICT,
+      tempBan: env.BOT_CAN_TEMP_BAN,
+      fullBan: false,
+      highConfidenceAction: settings.highConfidenceAction,
+      criticalConfidenceAction: settings.criticalConfidenceAction,
+      autoTempBanCritical: settings.autoTempBanCritical,
+    },
+    stats: data.botStats || initialData.botStats,
+    pendingActions,
+    appliedActions,
+    auditCount: data.botAuditLogs?.length || 0,
+    memoryCount: data.botMemories?.length || 0,
+    scanCount: data.botContentScans?.length || 0,
+  };
+}
+
+export async function getBotHealthFor(userId = null) {
+  const data = await readData();
+  if (userId) {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  }
+  return buildBotHealth(data);
+}
+
+export async function getBotModelsFor(userId = null) {
+  const data = await readData();
+  if (userId) {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  }
+  return listOllamaModels();
+}
+
+export async function getBotMemoryFor(userId) {
+  const data = await readData();
+  const user = data.users.find((item) => item._id === normalizeId(userId));
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  const memory = data.botMemories.find((item) => item.userId === user._id);
+  return {
+    user: publicUser(user),
+    memory: memory
+      ? {
+          casual: memory.casual || {},
+          shortTerm: (memory.shortTerm || []).slice(0, 8),
+          summary: memory.summary || "",
+          updatedAt: memory.updatedAt,
+        }
+      : {
+          casual: {},
+          shortTerm: [],
+          summary: "",
+          updatedAt: null,
+        },
+  };
+}
+
+export async function deleteBotMemoryFor(userId) {
+  return withData(async (data) => {
+    const user = data.users.find((item) => item._id === normalizeId(userId));
+    if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+    data.botMemories = (data.botMemories || []).filter((item) => item.userId !== user._id);
+    createBotAudit(data, {
+      actorId: user._id,
+      actorType: "user",
+      action: "bot_casual_memory_cleared",
+      targetType: "user",
+      targetId: user._id,
+      reason: "User cleared casual ModBot memory.",
+      result: "cleared",
+    });
+    return { success: true };
+  });
+}
+
+export async function getBotTargetScanPayloadFor(staffId, targetType, targetId) {
+  const data = await readData();
+  requireStaff(data, staffId);
+  const cleanType = ["post", "comment", "message", "user"].includes(targetType) ? targetType : null;
+  const cleanId = normalizeId(targetId);
+  if (!cleanType || !cleanId) throw Object.assign(new Error("Valid target is required."), { status: 400 });
+
+  if (cleanType === "post") {
+    const post = data.posts.find((item) => item._id === cleanId);
+    if (!post) throw Object.assign(new Error("Post not found"), { status: 404 });
+    return {
+      targetType: "post",
+      targetId: post._id,
+      targetUserId: post.author,
+      text: [post.text, post.content, post.caption, (post.hashtags || []).map((tag) => `#${tag}`).join(" ")]
+        .filter(Boolean)
+        .join("\n"),
+      snapshot: hydratePost(post, data, staffId),
+    };
+  }
+
+  if (cleanType === "comment") {
+    const post = data.posts.find((item) => findCommentInPost(item, cleanId).comment);
+    const { comment } = post ? findCommentInPost(post, cleanId) : {};
+    if (!comment) throw Object.assign(new Error("Comment not found"), { status: 404 });
+    return {
+      targetType: "comment",
+      targetId: comment._id,
+      targetUserId: comment.author,
+      text: comment.text || "",
+      snapshot: { ...comment, postId: post._id },
+    };
+  }
+
+  if (cleanType === "message") {
+    const message = data.messages.find((item) => item._id === cleanId);
+    if (!message) throw Object.assign(new Error("Message not found"), { status: 404 });
+    return {
+      targetType: "message",
+      targetId: message._id,
+      targetUserId: message.sender,
+      text: message.text || "",
+      snapshot: hydrateMessage(message, data, staffId),
+    };
+  }
+
+  const user = data.users.find((item) => item._id === cleanId);
+  if (!user) throw Object.assign(new Error("User not found"), { status: 404 });
+  return {
+    targetType: "user",
+    targetId: user._id,
+    targetUserId: user._id,
+    text: [user.username && `@${user.username}`, user.fullName, user.bio].filter(Boolean).join("\n"),
+    snapshot: publicUser(user),
+  };
+}
+
+export async function getBotAppealReviewPayloadFor(staffId, appealId) {
+  const data = await readData();
+  requireStaff(data, staffId);
+  const appeal = data.appeals.find((item) => item._id === normalizeId(appealId));
+  if (!appeal) throw Object.assign(new Error("Appeal not found"), { status: 404 });
+  const user = data.users.find((item) => item._id === appeal.user);
+  const lastAction =
+    (appeal.botActionId
+      ? (data.botActions || []).find((action) => action._id === appeal.botActionId)
+      : null) ||
+    (data.botActions || []).find((action) => action.targetUser === appeal.user);
+
+  return {
+    appeal: hydrateAppeal(appeal, data),
+    rawAppeal: appeal,
+    user: user ? publicUser(user) : null,
+    userPrivate: user
+      ? {
+          _id: user._id,
+          role: user.role,
+          moderationRecords: safeArray(user.moderationRecords),
+          botWarningCount: user.botWarningCount || 0,
+          botMuteCount: user.botMuteCount || 0,
+          botTempBanCount: user.botTempBanCount || 0,
+        }
+      : null,
+    originalDecision: lastAction || null,
+    content: lastAction?.details || appeal.reason || "",
+  };
+}
+
+export async function getBotAppealAutoReviewPayloadFor(appealId) {
+  const data = await readData();
+  const appeal = data.appeals.find((item) => item._id === normalizeId(appealId));
+  if (!appeal) throw Object.assign(new Error("Appeal not found"), { status: 404 });
+  if (!appeal.botActionId) throw Object.assign(new Error("Appeal is not tied to a ModBot action."), { status: 400 });
+  const user = data.users.find((item) => item._id === appeal.user);
+  const action = (data.botActions || []).find((item) => item._id === appeal.botActionId);
+  if (!user || !action) throw Object.assign(new Error("Appeal target not found"), { status: 404 });
+
+  return {
+    appeal: hydrateAppeal(appeal, data),
+    rawAppeal: appeal,
+    user: publicUser(user),
+    userPrivate: {
+      _id: user._id,
+      role: user.role,
+      moderationRecords: safeArray(user.moderationRecords),
+      botWarningCount: user.botWarningCount || 0,
+      botMuteCount: user.botMuteCount || 0,
+      botTempBanCount: user.botTempBanCount || 0,
+    },
+    originalDecision: action,
+    content: action.details || "",
+  };
+}
+
+export async function saveBotAppealReviewFor(staffId, appealId, review = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const appeal = data.appeals.find((item) => item._id === normalizeId(appealId));
+    if (!appeal) throw Object.assign(new Error("Appeal not found"), { status: 404 });
+    const createdAt = now();
+    const saved = {
+      _id: crypto.randomUUID(),
+      appealId: appeal._id,
+      userId: appeal.user,
+      reviewerId: staffUser._id,
+      ...review,
+      createdAt,
+    };
+    data.botAppealReviews.unshift(saved);
+    data.botAppealReviews.splice(500);
+    createBotAudit(data, {
+      actorId: staffUser._id,
+      actorType: "user",
+      action: "bot_appeal_review",
+      targetType: "appeal",
+      targetId: appeal._id,
+      reason: review.professionalReasonStaff || review.professionalReasonUser || "Bot appeal review.",
+      result: review.decision || "admin_review",
+      meta: {
+        confidence: review.confidence,
+        modelUsed: review.modelUsed,
+        fallbackModelUsed: review.fallbackModelUsed,
+      },
+    });
+    return saved;
+  });
+}
+
+export async function getBotRuntimeSnapshot() {
+  const data = await readData();
+  return {
+    users: data.users.map((user) => ({
+      ...publicUser(user),
+      reportHistoryCount: data.reports.filter(
+        (report) =>
+          report.reporter === user._id ||
+          report.targetUser === user._id ||
+          report.targetId === user._id ||
+          report.user === user._id ||
+          report.userId === user._id
+      ).length,
+      appealHistoryCount: data.appeals.filter(
+        (appeal) => appeal.user === user._id || appeal.userId === user._id || appeal.targetUser === user._id
+      ).length,
+    })),
+    botTraining: clone(data.botTraining),
+    botSettings: effectiveBotSettings(data),
+  };
+}
+
+export async function getBotAdminDataFor(userId) {
+  const data = await readData();
+  requireAdmin(data, userId);
+  return {
+    profile: publicUser(getBotUser(data)),
+    training: clone(data.botTraining),
+    settings: effectiveBotSettings(data),
+    health: buildBotHealth(data),
+    actions: (data.botActions || []).slice(0, 100).map((action) => hydrateBotAction(action, data)),
+    contentScans: (data.botContentScans || []).slice(0, 100),
+    imageScans: (data.botImageScans || []).slice(0, 100),
+    appealReviews: (data.botAppealReviews || []).slice(0, 100),
+    memories: (data.botMemories || []).slice(0, 100).map((memory) => ({
+      _id: memory._id,
+      user: publicUser(data.users.find((user) => user._id === memory.userId)),
+      casual: memory.casual,
+      summary: memory.summary,
+      updatedAt: memory.updatedAt,
+    })),
+    modelHealth: getOllamaHealthCache(),
+    modelRouting: modelRoutingSummary(),
+    auditLogs: (data.botAuditLogs || []).slice(0, 100),
+    punishments: (data.botPunishments || []).slice(0, 100).map((punishment) => ({
+      ...punishment,
+      targetUser: publicUser(data.users.find((user) => user._id === punishment.targetUser)),
+    })),
+  };
+}
+
+export async function getBotSettingsFor(userId) {
+  const data = await readData();
+  requireAdmin(data, userId);
+  return effectiveBotSettings(data);
+}
+
+export async function updateBotSettingsFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const adminUser = requireAdmin(data, userId);
+    const current = {
+      ...initialData.botSettings,
+      ...(data.botSettings || {}),
+    };
+    const boolFields = [
+      "enabled",
+      "scanPosts",
+      "scanComments",
+      "scanMessages",
+      "scanImages",
+      "scanReports",
+      "scanAppeals",
+      "localAIEnabled",
+      "allowAutoActions",
+      "autoHideHighConfidence",
+      "autoMuteCritical",
+      "createReports",
+      "warnUsers",
+      "randomCommentEnabled",
+      "thankFollowEnabled",
+      "autoFollowBack",
+      "allowModelReply",
+      "autoTempBanCritical",
+      "botCanAcceptLowRiskAppeals",
+    ];
+    const textFields = [
+      "lowConfidenceAction",
+      "mediumConfidenceAction",
+      "highConfidenceAction",
+      "criticalConfidenceAction",
+    ];
+
+    boolFields.forEach((field) => {
+      if (payload[field] !== undefined) current[field] = Boolean(payload[field]);
+    });
+    textFields.forEach((field) => {
+      if (payload[field] !== undefined) current[field] = normalizeBotActionType(payload[field]).slice(0, 40);
+    });
+    if (payload.maxMuteMinutes !== undefined) current.maxMuteMinutes = Math.max(1, Math.min(env.BOT_MAX_MUTE_MINUTES, Number(payload.maxMuteMinutes) || 15));
+    if (payload.actionCooldownMs !== undefined) current.actionCooldownMs = Math.max(5000, Math.min(3600000, Number(payload.actionCooldownMs) || 30000));
+    if (payload.maxActionsPerUserPerHour !== undefined) current.maxActionsPerUserPerHour = Math.max(1, Math.min(100, Number(payload.maxActionsPerUserPerHour) || 12));
+
+    data.botSettings = current;
+    createBotAudit(data, {
+      actorId: adminUser._id,
+      actorType: "user",
+      action: "bot_settings_update",
+      targetType: "bot",
+      targetId: getBotUser(data)?._id || null,
+      reason: "Updated ModBot runtime settings",
+      result: "saved",
+    });
+
+    return effectiveBotSettings(data);
+  });
+}
+
+export async function recordBotModelCacheFor(payload = {}) {
+  return withData(async (data) => {
+    const createdAt = now();
+    const event = {
+      _id: crypto.randomUUID(),
+      provider: payload.provider || "local",
+      model: payload.model || "",
+      status: payload.status || "unknown",
+      reason: payload.reason || "",
+      createdAt,
+    };
+    data.botModelCache.unshift(event);
+    data.botModelCache.splice(100);
+    return event;
+  });
+}
+
+export async function applyBotDecisionFor(payload = {}) {
+  return withData(async (data) => {
+    const settings = effectiveBotSettings(data);
+    const bot = getBotUser(data);
+    if (!settings.enabled || !bot) {
+      return { skipped: true, reason: "bot_disabled" };
+    }
+
+    const targetType = payload.targetType || "message";
+    const targetId = normalizeId(payload.targetId);
+    const actorUserId = normalizeId(payload.actorUserId || payload.userId);
+    const targetUserId = normalizeId(
+      payload.targetUserId || getTargetUserId(data, targetType, targetId, actorUserId)
+    );
+    const targetUser = data.users.find((user) => user._id === targetUserId);
+    const actorUser = data.users.find((user) => user._id === actorUserId);
+
+    if (targetUser?.isBot || actorUser?.isBot) {
+      return { skipped: true, reason: "bot_user_ignored" };
+    }
+
+    const rawActionType =
+      payload.actionType ||
+      payload.recommendedAction ||
+      botActionFromSeverity(payload.severity || payload.decision?.severity, settings);
+    let actionType = normalizeBotActionType(rawActionType);
+
+    if (actionType === "warn" && !settings.warnUsers) actionType = "log";
+    if (actionType === "report" && !settings.createReports) actionType = "log";
+
+    const hourlyActions = targetUserId ? userBotActionsInWindow(data, targetUserId) : [];
+    if (targetUserId && hourlyActions.length >= settings.maxActionsPerUserPerHour) {
+      actionType = "escalate";
+    }
+
+    if (targetUserId && recentSimilarBotAction(data, targetUserId, actionType, settings.actionCooldownMs)) {
+      return { skipped: true, reason: "cooldown" };
+    }
+
+    const createdAt = now();
+    const needsReviewActions = new Set(["hide_content", "temp_mute", "restrict", "temp_ban"]);
+    const canAutoApply =
+      !needsReviewActions.has(actionType) ||
+      (settings.allowAutoActions &&
+        ((actionType === "hide_content" && settings.autoHideHighConfidence) ||
+          (actionType === "temp_mute" && settings.autoMuteCritical) ||
+          (actionType === "restrict" && env.BOT_CAN_TEMP_RESTRICT) ||
+          (actionType === "temp_ban" && settings.autoTempBanCritical)));
+    const maxActionMinutes =
+      actionType === "temp_ban" ? env.BOT_MAX_TEMP_BAN_MINUTES : settings.maxMuteMinutes;
+    const fallbackActionMinutes =
+      actionType === "temp_ban" ? env.BOT_CRITICAL_TEMP_BAN_MINUTES : env.BOT_SPAM_MUTE_MINUTES;
+    const actionMinutes = ["temp_ban", "temp_mute", "restrict", "hide_content"].includes(actionType)
+      ? Math.max(1, Math.min(maxActionMinutes, Number(payload.minutes || fallbackActionMinutes)))
+      : 0;
+
+    const action = {
+      _id: crypto.randomUUID(),
+      bot: bot._id,
+      source: payload.source || "bot-engine",
+      eventType: payload.eventType || null,
+      targetType,
+      targetId,
+      targetUser: targetUserId || null,
+      actorUser: actorUserId || targetUserId || null,
+      actionType,
+      category: payload.category || payload.decision?.moderation?.category || payload.decision?.intent || "safety",
+      severity: payload.severity || payload.decision?.severity || "none",
+      confidence: Number(payload.confidence ?? payload.decision?.confidence ?? 0),
+      reason: (payload.reason || payload.decision?.moderation?.reason || payload.decision?.reply || "ModBot safety review").toString().slice(0, 600),
+      details: (payload.details || payload.text || "").toString().slice(0, 1600),
+      status: canAutoApply ? "queued" : "needs_review",
+      minutes: actionMinutes,
+      modelUsed: payload.modelUsed || payload.decision?.modelUsed || payload.decision?.model || null,
+      fallbackModelUsed: payload.fallbackModelUsed || payload.decision?.fallbackModelUsed || payload.decision?.fallbackModel || null,
+      promptVersion: payload.promptVersion || payload.decision?.promptVersion || null,
+      ruleVersion: payload.ruleVersion || payload.decision?.ruleVersion || null,
+      reasonUser: (payload.reasonUser || payload.decision?.reasonUser || payload.reason || "").toString().slice(0, 600),
+      reasonStaff: (payload.reasonStaff || payload.decision?.reasonStaff || payload.reason || "").toString().slice(0, 1000),
+      evidenceSummary: (payload.evidenceSummary || payload.decision?.evidenceSummary || "").toString().slice(0, 600),
+      appealAllowed: payload.appealAllowed ?? payload.decision?.appealAllowed ?? true,
+      restoreEligible: payload.restoreEligible ?? payload.decision?.restoreEligible ?? true,
+      decision: payload.decision || null,
+      appliedEffects: [],
+      reversible: ["hide_content", "temp_mute", "restrict", "temp_ban"].includes(actionType),
+      reviewedBy: null,
+      reviewedAt: null,
+      undoneBy: null,
+      undoneAt: null,
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    if (actionType === "log") action.status = "logged";
+    data.botActions.unshift(action);
+    data.botActions.splice(1000);
+    const scan = {
+      _id: crypto.randomUUID(),
+      botActionId: action._id,
+      modelUsed: action.modelUsed,
+      fallbackModelUsed: action.fallbackModelUsed,
+      promptVersion: action.promptVersion,
+      ruleVersion: action.ruleVersion,
+      actorUserId: action.actorUser,
+      targetUserId: action.targetUser,
+      targetType: action.targetType,
+      targetId: action.targetId,
+      contentSnapshot: action.details,
+      category: action.category,
+      severity: action.severity,
+      confidence: action.confidence,
+      recommendedAction: actionType,
+      reasonUser: action.reasonUser,
+      reasonStaff: action.reasonStaff,
+      evidenceSummary: action.evidenceSummary,
+      appealAllowed: action.appealAllowed,
+      restoreEligible: action.restoreEligible,
+      createdAt,
+    };
+    data.botContentScans.unshift(scan);
+    data.botContentScans.splice(1000);
+    data.botModerationDecisions.unshift(scan);
+    data.botModerationDecisions.splice(1000);
+    data.botStats = {
+      ...initialData.botStats,
+      ...(data.botStats || {}),
+      eventsProcessed: Number(data.botStats?.eventsProcessed || 0) + 1,
+      actionsCreated: Number(data.botStats?.actionsCreated || 0) + 1,
+      lastEventAt: createdAt,
+      lastError: null,
+    };
+
+    let result = "logged";
+    if (action.status === "queued") {
+      const applied = applyStoredBotAction(data, action, bot);
+      action.status = applied.applied ? "applied" : "needs_review";
+      action.appliedEffects = applied.effects;
+      result = applied.result;
+    } else if (action.status === "logged") {
+      result = "logged";
+    } else {
+      data.users
+        .filter((user) => staffRoles.has(user.role))
+        .forEach((staffUser) => {
+          addNotification(data, staffUser._id, {
+            actorId: bot._id,
+            type: "bot-review",
+            title: "Bot action needs review",
+            message: `MEDIA ModBot recommends ${actionType} for ${targetType}.`,
+          });
+        });
+      result = "needs_review";
+    }
+
+    action.updatedAt = now();
+    createBotAudit(data, {
+      actorId: bot._id,
+      actorType: "bot",
+      action: `bot_${actionType}`,
+      targetType,
+      targetId,
+      reason: action.reason,
+      result,
+      meta: { status: action.status, confidence: action.confidence, severity: action.severity },
+    });
+
+    return hydrateBotAction(action, data);
+  });
+}
+
+export async function getBotActionsFor(staffId, filters = {}) {
+  const data = await readData();
+  requireStaff(data, staffId);
+  const status = filters.status || "all";
+  return (data.botActions || [])
+    .filter((action) => status === "all" || action.status === status)
+    .slice(0, 200)
+    .map((action) => hydrateBotAction(action, data));
+}
+
+export async function reviewBotActionFor(staffId, actionId, review = {}) {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const action = data.botActions.find((item) => item._id === normalizeId(actionId));
+    if (!action) throw Object.assign(new Error("Bot action not found"), { status: 404 });
+
+    const decision = review.status || review.decision || "approved";
+    if (decision === "rejected") {
+      action.status = "rejected";
+      action.reviewedBy = staffUser._id;
+      action.reviewedAt = now();
+      action.reviewReason = (review.reason || "Rejected by staff").toString().slice(0, 600);
+      action.updatedAt = now();
+      createBotAudit(data, {
+        actorId: staffUser._id,
+        actorType: "user",
+        action: "bot_action_rejected",
+        targetType: action.targetType,
+        targetId: action.targetId,
+        reason: action.reviewReason,
+        result: "rejected",
+      });
+      return hydrateBotAction(action, data);
+    }
+
+    if (!["needs_review", "queued", "logged"].includes(action.status)) {
+      throw Object.assign(new Error("This bot action has already been reviewed."), { status: 400 });
+    }
+
+    const applied = applyStoredBotAction(data, action, staffUser);
+    action.status = applied.applied ? "applied" : "rejected";
+    action.appliedEffects = applied.effects;
+    action.reviewedBy = staffUser._id;
+    action.reviewedAt = now();
+    action.reviewReason = (review.reason || "Approved by staff").toString().slice(0, 600);
+    action.updatedAt = now();
+    createBotAudit(data, {
+      actorId: staffUser._id,
+      actorType: "user",
+      action: "bot_action_approved",
+      targetType: action.targetType,
+      targetId: action.targetId,
+      reason: action.reviewReason,
+      result: applied.result,
+    });
+    return hydrateBotAction(action, data);
+  });
+}
+
+function undoBotActionInData(data, actorUser, action, reason = "Undone", actorType = "user") {
+  if (!action) throw Object.assign(new Error("Bot action not found"), { status: 404 });
+
+  if (action.status !== "applied") {
+    throw Object.assign(new Error("Only applied bot actions can be undone."), { status: 400 });
+  }
+
+  const actionType = normalizeBotActionType(action.actionType);
+  if (actionType === "hide_content") {
+    unhideBotContentTarget(data, action);
+  } else if (actionType === "temp_mute") {
+    const targetUser = data.users.find((user) => user._id === action.targetUser);
+    if (targetUser && targetUser.messageBanReason === action.reason) {
+      targetUser.messageBanUntil = null;
+      targetUser.messageBanReason = "";
+    }
+    if ((action.appliedEffects || []).includes("hidden-content")) {
+      unhideBotContentTarget(data, action);
+    }
+  } else if (actionType === "restrict") {
+    const targetUser = data.users.find((user) => user._id === action.targetUser);
+    if (targetUser?.botRestriction?.reason === action.reason) {
+      targetUser.botRestriction = {
+        postUntil: null,
+        commentUntil: null,
+        messageUntil: null,
+        reason: "",
+        issuedAt: null,
+      };
+    }
+    if ((action.appliedEffects || []).includes("hidden-content")) {
+      unhideBotContentTarget(data, action);
+    }
+  } else if (actionType === "temp_ban") {
+    const targetUser = data.users.find((user) => user._id === action.targetUser);
+    if (targetUser && targetUser.banReason === action.reason && targetUser.fullBannedAt == null) {
+      targetUser.bannedUntil = null;
+      targetUser.banReason = "";
+      targetUser.banIssuedAt = null;
+      targetUser.banDays = null;
+    }
+    if ((action.appliedEffects || []).includes("hidden-content")) {
+      unhideBotContentTarget(data, action);
+    }
+  }
+
+  action.status = "undone";
+  action.undoneBy = actorUser?._id || null;
+  action.undoneByType = actorType;
+  action.undoneAt = now();
+  action.undoReason = reason.toString().slice(0, 600);
+  action.updatedAt = now();
+  createBotAudit(data, {
+    actorId: actorUser?._id || null,
+    actorType,
+    action: "bot_action_undone",
+    targetType: action.targetType,
+    targetId: action.targetId,
+    reason: action.undoReason,
+    result: "undone",
+  });
+
+  return action;
+}
+
+export async function undoBotActionFor(staffId, actionId, reason = "Undone by staff") {
+  return withData(async (data) => {
+    const staffUser = requireStaff(data, staffId);
+    const action = data.botActions.find((item) => item._id === normalizeId(actionId));
+    undoBotActionInData(data, staffUser, action, reason, "user");
+
+    return hydrateBotAction(action, data);
+  });
+}
+
+export async function resolveBotAppealByBot(appealId, review = {}) {
+  return withData(async (data) => {
+    const appeal = data.appeals.find((item) => item._id === normalizeId(appealId));
+    if (!appeal) throw Object.assign(new Error("Appeal not found"), { status: 404 });
+    if (!appeal.botActionId) throw Object.assign(new Error("Appeal is not tied to a ModBot action."), { status: 400 });
+
+    const settings = effectiveBotSettings(data);
+    const bot = getBotUser(data);
+    const targetUser = data.users.find((user) => user._id === appeal.user);
+    const action = (data.botActions || []).find((item) => item._id === appeal.botActionId);
+    if (!bot || !targetUser || !action) throw Object.assign(new Error("Appeal target not found"), { status: 404 });
+
+    const createdAt = now();
+    const normalizedDecision = ["approve", "decline", "admin_review"].includes(review.decision)
+      ? review.decision
+      : "admin_review";
+    const confidence = Math.max(0, Math.min(1, Number(review.confidence || 0)));
+    const saved = {
+      _id: crypto.randomUUID(),
+      appealId: appeal._id,
+      userId: appeal.user,
+      reviewerId: bot._id,
+      automated: true,
+      ...review,
+      decision: normalizedDecision,
+      confidence,
+      createdAt,
+    };
+    data.botAppealReviews.unshift(saved);
+    data.botAppealReviews.splice(500);
+
+    const canSelfResolve =
+      settings.enabled &&
+      settings.scanAppeals !== false &&
+      action.status === "applied" &&
+      action.appealAllowed !== false &&
+      action.restoreEligible !== false &&
+      action.reversible !== false &&
+      !review.adminReviewNeeded &&
+      confidence >= 0.62;
+
+    if (normalizedDecision === "approve" && canSelfResolve) {
+      undoBotActionInData(
+        data,
+        bot,
+        action,
+        review.professionalReasonStaff || review.professionalReasonUser || "ModBot approved appeal.",
+        "bot"
+      );
+      appeal.status = "approved";
+      appeal.response =
+        review.professionalReasonUser ||
+        "MEDIA ModBot reviewed your appeal and restored the action.";
+      appeal.resolvedBy = bot._id;
+      appeal.resolvedByType = "bot";
+      appeal.updatedAt = now();
+      addNotification(data, appeal.user, {
+        actorId: bot._id,
+        type: "appeal-update",
+        title: "Appeal approved",
+        message: appeal.response,
+      });
+    } else if (normalizedDecision === "decline" && canSelfResolve) {
+      appeal.status = "denied";
+      appeal.response =
+        review.professionalReasonUser ||
+        "MEDIA ModBot reviewed your appeal and kept the action in place.";
+      appeal.resolvedBy = bot._id;
+      appeal.resolvedByType = "bot";
+      appeal.updatedAt = now();
+      addNotification(data, appeal.user, {
+        actorId: bot._id,
+        type: "appeal-update",
+        title: "Appeal reviewed",
+        message: appeal.response,
+      });
+    } else {
+      appeal.status = "reviewing";
+      appeal.response =
+        review.professionalReasonUser ||
+        "MEDIA ModBot reviewed this appeal and sent it to staff for a final check.";
+      appeal.updatedAt = now();
+      data.users
+        .filter((user) => staffRoles.has(user.role))
+        .forEach((staffUser) => {
+          addNotification(data, staffUser._id, {
+            actorId: bot._id,
+            type: "appeal",
+            title: "Appeal needs staff review",
+            message: `${targetUser.fullName}'s ModBot appeal needs a human decision.`,
+          });
+        });
+    }
+
+    createBotAudit(data, {
+      actorId: bot._id,
+      actorType: "bot",
+      action: "bot_appeal_auto_review",
+      targetType: "appeal",
+      targetId: appeal._id,
+      reason: review.professionalReasonStaff || review.professionalReasonUser || "Automated appeal review.",
+      result: appeal.status,
+      meta: {
+        botActionId: action._id,
+        actionType: action.actionType,
+        decision: normalizedDecision,
+        confidence,
+        modelUsed: review.modelUsed,
+        fallbackModelUsed: review.fallbackModelUsed,
+      },
+    });
+
+    return { appeal: hydrateAppeal(appeal, data), review: saved, action: hydrateBotAction(action, data) };
+  });
+}
+
+export async function updateAdminSettingsFor(userId, payload = {}) {
+  return withData(async (data) => {
+    const adminUser = requireAdmin(data, userId);
+    const current = data.adminSettings || initialData.adminSettings;
+    const nextSettings = { ...current };
+
+    if (payload.defaultBanDays !== undefined) {
+      nextSettings.defaultBanDays = Math.max(1, Math.min(365, Number(payload.defaultBanDays) || 7));
+    }
+    if (payload.defaultModerationReason !== undefined) {
+      nextSettings.defaultModerationReason = payload.defaultModerationReason.toString().trim().slice(0, 300) || "Community safety";
+    }
+    if (payload.defaultStaffTitle !== undefined) {
+      nextSettings.defaultStaffTitle = payload.defaultStaffTitle.toString().trim().slice(0, 120) || "Message from moderation";
+    }
+    if (payload.staffSignature !== undefined) {
+      nextSettings.staffSignature = payload.staffSignature.toString().trim().slice(0, 300);
+    }
+    if (payload.autoRefreshSeconds !== undefined) {
+      nextSettings.autoRefreshSeconds = Math.max(3, Math.min(60, Number(payload.autoRefreshSeconds) || 5));
+    }
+    if (payload.requireEmailForStaffOutreach !== undefined) {
+      nextSettings.requireEmailForStaffOutreach = Boolean(payload.requireEmailForStaffOutreach);
+    }
+    if (payload.reportCategories !== undefined) {
+      const categories = Array.isArray(payload.reportCategories)
+        ? payload.reportCategories
+        : payload.reportCategories.toString().split(/\r?\n|,/);
+      nextSettings.reportCategories = categories
+        .map((category) => category.toString().trim().slice(0, 60))
+        .filter(Boolean)
+        .slice(0, 20);
+      if (nextSettings.reportCategories.length === 0) {
+        nextSettings.reportCategories = initialData.adminSettings.reportCategories;
+      }
+    }
+
+    data.adminSettings = nextSettings;
+    data.moderationActions.push({
+      _id: crypto.randomUUID(),
+      staff: adminUser._id,
+      targetUser: adminUser._id,
+      type: "adminSettingsUpdate",
+      reason: "Updated admin panel settings",
+      days: null,
+      until: null,
+      createdAt: now(),
+    });
+
+    return clone(data.adminSettings);
+  });
+}
+
+export async function getAdminPanelFor(userId) {
+  const data = await readData();
+  requireAdmin(data, userId);
+  const visibleMessageIds = reportedMessageIds(data);
+  const reportedMessages = data.messages.filter((message) => visibleMessageIds.has(message._id));
+
+  return {
+    dbPath,
+    mediaDir,
+    counts: {
+      users: data.users.length,
+      posts: data.posts.length,
+      messages: data.messages.length,
+      openReports: data.reports.filter((report) => report.status === "open").length,
+      openAppeals: data.appeals.filter((appeal) => appeal.status === "open").length,
+      activeBans: data.users.filter((user) => isFuture(user.bannedUntil)).length,
+      activeFullBans: data.users.filter((user) => user.fullBannedAt).length,
+      activeMessageBans: data.users.filter((user) => isFuture(user.messageBanUntil)).length,
+      activeShadowBans: data.users.filter((user) => isFuture(user.shadowBannedUntil)).length,
+      activeUsers: data.users.filter((user) => user.isOnline).length,
+      usersInCall: data.users.filter((user) => user.inCall).length,
+      callHistory: data.callHistory.length,
+      verifiedEmails: data.users.filter((user) => user.emailVerified).length,
+      unverifiedEmails: data.users.filter((user) => !user.emailVerified).length,
+      verifiedBadges: data.users.filter(
+        (user) =>
+          !user.verifiedBadgeBlocked &&
+          (user.verifiedBadgeOverride ||
+            ((user.followers?.length || 0) >= 1000 &&
+              (user.moderationRecords || []).filter((record) =>
+                ["ban", "fullBan", "messageBan", "shadowBan", "warn"].includes(record.type)
+              ).length === 0))
+      ).length,
+      blockedVerifiedBadges: data.users.filter((user) => user.verifiedBadgeBlocked).length,
+      archivedPosts: data.posts.filter((post) => post.archived).length,
+      reposts: data.posts.filter((post) => post.repostOf).length,
+      comments: data.posts.reduce((total, post) => total + countCommentTree(post.comments || []), 0),
+      pendingBotActions: data.botActions.filter((action) => action.status === "needs_review").length,
+    },
+    users: data.users.map((user) => ({
+      ...publicUser(user),
+      reportHistoryCount: data.reports.filter(
+        (report) =>
+          report.reporter === user._id ||
+          report.targetUser === user._id ||
+          report.targetId === user._id ||
+          report.user === user._id ||
+          report.userId === user._id
+      ).length,
+      appealHistoryCount: data.appeals.filter(
+        (appeal) => appeal.user === user._id || appeal.userId === user._id || appeal.targetUser === user._id
+      ).length,
+    })),
+    reports: data.reports
+      .slice()
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .map((report) => hydrateReport(report, data, userId)),
+    appeals: data.appeals
+      .slice()
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .map((appeal) => hydrateAppeal(appeal, data)),
+    posts: data.posts
+      .slice()
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .map((post) => hydratePost(post, data, userId)),
+    messages: reportedMessages
+      .slice(-100)
+      .reverse()
+      .map((message) => hydrateMessage(message, data, userId)),
+    outreachEvents: data.outreachEvents
+      .slice(0, 100)
+      .map((event) => ({
+        ...event,
+        staff: publicUser(data.users.find((user) => user._id === event.staff)),
+        targetUser: publicUser(data.users.find((user) => user._id === event.targetUser)),
+      })),
+    botTraining: data.botTraining,
+    botSettings: effectiveBotSettings(data),
+    botHealth: buildBotHealth(data),
+    botActions: data.botActions
+      .slice(0, 100)
+      .map((action) => hydrateBotAction(action, data)),
+    botContentScans: (data.botContentScans || []).slice(0, 100),
+    botImageScans: (data.botImageScans || []).slice(0, 100),
+    botAppealReviews: (data.botAppealReviews || []).slice(0, 100),
+    botMemories: (data.botMemories || []).slice(0, 100).map((memory) => ({
+      _id: memory._id,
+      user: publicUser(data.users.find((user) => user._id === memory.userId)),
+      casual: memory.casual,
+      summary: memory.summary,
+      updatedAt: memory.updatedAt,
+    })),
+    botModelHealth: getOllamaHealthCache(),
+    botModelRouting: modelRoutingSummary(),
+    botAuditLogs: data.botAuditLogs.slice(0, 100),
+    botPunishments: data.botPunishments
+      .slice(0, 100)
+      .map((punishment) => ({
+        ...punishment,
+        targetUser: publicUser(data.users.find((user) => user._id === punishment.targetUser)),
+      })),
+    adminSettings: data.adminSettings,
+    moderationActions: data.moderationActions
+      .slice(-50)
+      .reverse()
+      .map((action) => hydrateModerationAction(action, data)),
+    recentMessages: reportedMessages.slice(-10).map((message) => hydrateMessage(message, data, userId)),
+    recentCalls: data.callHistory.slice(-10),
+  };
+}
+
+export async function getDebugInfo(userId) {
+  const data = await readData();
+  requireAdmin(data, userId);
+  const visibleMessageIds = reportedMessageIds(data);
+
+  return {
+    dbPath,
+    mediaDir,
+    counts: {
+      users: data.users.length,
+      posts: data.posts.length,
+      messages: data.messages.length,
+      followRequests: safeArray(data.followRequests).filter((request) => request.status === "pending").length,
+      activeUsers: data.users.filter((user) => user.isOnline).length,
+      usersInCall: data.users.filter((user) => user.inCall).length,
+      callHistory: data.callHistory.length,
+    },
+    users: data.users.map(publicUser),
+    recentMessages: data.messages
+      .filter((message) => visibleMessageIds.has(message._id))
+      .slice(-10)
+      .map((message) => hydrateMessage(message, data, userId)),
+    recentCalls: data.callHistory.slice(-10),
+  };
+}

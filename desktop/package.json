@@ -1,0 +1,116 @@
+{
+  "name": "bettermedia-desktop",
+  "version": "1.0.0",
+  "description": "Windows launcher and control panel for BetterMedia local-first app.",
+  "main": "electron-main.js",
+  "private": true,
+  "author": "BetterMedia",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "renderer:dev": "vite --host 127.0.0.1 --port 5180",
+    "build": "vite build",
+    "dist": "npm run build && electron-builder --win",
+    "pack": "npm run build && electron-builder --dir",
+    "clean": "node scripts/clean-release.js",
+    "open-release": "node scripts/open-release.js"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^6.3.5",
+    "electron": "^35.2.1",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.bettermedia.launcher",
+    "productName": "BetterMedia Launcher",
+    "artifactName": "BetterMedia-Launcher-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release-final"
+    },
+    "toolsets": {
+      "winCodeSign": "1.1.0"
+    },
+    "files": [
+      "electron-main.js",
+      "preload.js",
+      "package.json",
+      "renderer/dist/**/*",
+      "assets/**/*",
+      "resources/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!node_modules/**",
+          "!data/backups/**",
+          "!data/db.*.tmp",
+          "!*.log",
+          "!runtime.*.log",
+          "!local-server.log",
+          "!node_modules/.cache/**",
+          "!**/.npm-cache/**"
+        ]
+      },
+      {
+        "from": "../backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!nodemon/**",
+          "!**/*.exe",
+          "!bare-fs/prebuilds/android-*/**",
+          "!bare-fs/prebuilds/darwin-*/**",
+          "!bare-fs/prebuilds/ios-*/**",
+          "!bare-fs/prebuilds/linux-*/**",
+          "!bare-fs/prebuilds/win32-arm64/**",
+          "!bare-os/prebuilds/android-*/**",
+          "!bare-os/prebuilds/darwin-*/**",
+          "!bare-os/prebuilds/ios-*/**",
+          "!bare-os/prebuilds/linux-*/**",
+          "!bare-os/prebuilds/win32-arm64/**",
+          "!bare-url/prebuilds/android-*/**",
+          "!bare-url/prebuilds/darwin-*/**",
+          "!bare-url/prebuilds/ios-*/**",
+          "!bare-url/prebuilds/linux-*/**",
+          "!bare-url/prebuilds/win32-arm64/**"
+        ]
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "frontend/dist"
+      },
+      {
+        "from": "resources/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "resources/icon.ico",
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BetterMedia Launcher",
+      "installerIcon": "resources/icon.ico",
+      "uninstallerIcon": "resources/icon.ico",
+      "installerHeaderIcon": "resources/icon.ico",
+      "include": "build/installer.nsh",
+      "runAfterFinish": true
+    }
+  }
+}

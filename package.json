@@ -1,0 +1,24 @@
+{
+  "name": "media",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "axios": "^1.16.1",
+    "react": "^19.1.0"
+  },
+  "scripts": {
+    "dev": "npm run dev --prefix backend",
+    "build": "npm install --prefix backend && npm install --prefix frontend && npm run build --prefix frontend",
+    "start": "npm run start --prefix backend",
+    "tunnel": "npm run tunnel --prefix backend",
+    "desktop:dev": "npm run dev --prefix desktop",
+    "desktop:build": "npm run build --prefix desktop",
+    "desktop:dist": "npm run dist --prefix desktop",
+    "desktop:clean": "npm run clean --prefix desktop",
+    "desktop:open-release": "npm run open-release --prefix desktop"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}
