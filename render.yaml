@@ -71,7 +71,7 @@ services:
       - key: UPSTASH_REDIS_TIMEOUT_MS
         value: "10000"
       - key: REDIS_PREFIX
-        value: bettermedia:
+        value: "bettermedia:"
       - key: USE_REDIS_SOCKET_ADAPTER
         value: "false"
       - key: REDIS_SOCKET_ADAPTER
