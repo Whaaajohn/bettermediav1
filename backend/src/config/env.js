@@ -3,7 +3,7 @@ import { fileURLToPath } from "url";
 
 dotenv.config({
   path: fileURLToPath(new URL("../../.env", import.meta.url)),
-  override: true,
+  override: false,
 });
 
 const booleanValue = (value, fallback = false) => {
@@ -51,13 +51,21 @@ export const env = {
   REDIS_ENABLED: booleanValue(process.env.REDIS_ENABLED, false),
   REDIS_REQUIRED: booleanValue(process.env.REDIS_REQUIRED, process.env.NODE_ENV === "production"),
   REDIS_URL: process.env.REDIS_URL || "",
+  UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL || "",
+  UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN || "",
+  UPSTASH_REDIS_REST_READONLY_TOKEN: process.env.UPSTASH_REDIS_REST_READONLY_TOKEN || "",
+  UPSTASH_REDIS_TIMEOUT_MS: numberValue(process.env.UPSTASH_REDIS_TIMEOUT_MS, 10000),
   REDIS_PREFIX: process.env.REDIS_PREFIX || "bettermedia:",
   USE_REDIS_SOCKET_ADAPTER: booleanValue(process.env.USE_REDIS_SOCKET_ADAPTER ?? process.env.REDIS_SOCKET_ADAPTER, false),
   REDIS_SOCKET_ADAPTER: booleanValue(process.env.REDIS_SOCKET_ADAPTER ?? process.env.USE_REDIS_SOCKET_ADAPTER, false),
   REDIS_RATE_LIMITS: booleanValue(process.env.REDIS_RATE_LIMITS, true),
   REDIS_QUEUES: booleanValue(process.env.REDIS_QUEUES, true),
 
-  EMAIL_ENABLED: booleanValue(process.env.EMAIL_ENABLED ?? process.env.SMTP_ENABLED, Boolean(process.env.SMTP_USER && process.env.SMTP_PASS)),
+  EMAIL_ENABLED: booleanValue(
+    process.env.EMAIL_ENABLED ?? process.env.SMTP_ENABLED,
+    Boolean((process.env.SMTP_USER && process.env.SMTP_PASS) || process.env.RESEND_API_KEY)
+  ),
+  EMAIL_PROVIDER: (process.env.EMAIL_PROVIDER || (process.env.RESEND_API_KEY ? "resend" : "smtp")).toLowerCase(),
   SMTP_ENABLED: booleanValue(process.env.SMTP_ENABLED ?? process.env.EMAIL_ENABLED, Boolean(process.env.SMTP_USER && process.env.SMTP_PASS)),
   SMTP_HOST: process.env.SMTP_HOST || "",
   SMTP_PORT: numberValue(process.env.SMTP_PORT, 587),
@@ -70,6 +78,9 @@ export const env = {
   SMTP_FROM_EMAIL: process.env.SMTP_FROM_EMAIL || process.env.MAIL_FROM_EMAIL || process.env.SMTP_USER || "",
   MAIL_FROM_NAME: process.env.MAIL_FROM_NAME || "Better Media",
   MAIL_FROM_EMAIL: process.env.MAIL_FROM_EMAIL || "no-reply@bettermedia.local",
+  RESEND_API_KEY: process.env.RESEND_API_KEY || "",
+  RESEND_API_URL: process.env.RESEND_API_URL || "https://api.resend.com/emails",
+  RESEND_TIMEOUT_MS: numberValue(process.env.RESEND_TIMEOUT_MS, 15000),
   DEV_PRINT_EMAIL_CODES: booleanValue(process.env.DEV_PRINT_EMAIL_CODES, true),
   LOGIN_ALERT_EMAILS: booleanValue(process.env.LOGIN_ALERT_EMAILS, true),
   LOGIN_ALERT_TRUSTED_DEVICE_SKIP: booleanValue(process.env.LOGIN_ALERT_TRUSTED_DEVICE_SKIP, false),
@@ -183,6 +194,15 @@ export const env = {
   OLLAMA_SOCIAL_COMMENTS_VERIFIED_ONLY: booleanValue(process.env.OLLAMA_SOCIAL_COMMENTS_VERIFIED_ONLY, true),
   OLLAMA_TEMPERATURE: numberValue(process.env.OLLAMA_TEMPERATURE, 0.35),
   OLLAMA_NUM_PREDICT: numberValue(process.env.OLLAMA_NUM_PREDICT, 120),
+  GEMINI_ENABLED: booleanValue(process.env.GEMINI_ENABLED, Boolean(process.env.GEMINI_API_KEY)),
+  GEMINI_API_KEY: process.env.GEMINI_API_KEY || "",
+  GEMINI_API_BASE_URL: process.env.GEMINI_API_BASE_URL || "https://generativelanguage.googleapis.com/v1beta",
+  GEMINI_MODEL: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  GEMINI_VISION_MODEL: process.env.GEMINI_VISION_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  GEMINI_TIMEOUT_MS: numberValue(process.env.GEMINI_TIMEOUT_MS, 30000),
+  GEMINI_MAX_CONTEXT_CHARS: numberValue(process.env.GEMINI_MAX_CONTEXT_CHARS, 16000),
+  GEMINI_MAX_OUTPUT_TOKENS: numberValue(process.env.GEMINI_MAX_OUTPUT_TOKENS, 700),
+  GEMINI_TEMPERATURE: numberValue(process.env.GEMINI_TEMPERATURE, 0.25),
   BOT_QUEUE_CONCURRENCY: numberValue(process.env.BOT_QUEUE_CONCURRENCY, 1),
   BOT_QUEUE_MAX_PENDING: numberValue(process.env.BOT_QUEUE_MAX_PENDING, 200),
   BOT_QUEUE_DROP_LOW_PRIORITY_WHEN_FULL: booleanValue(process.env.BOT_QUEUE_DROP_LOW_PRIORITY_WHEN_FULL, true),
@@ -297,8 +317,9 @@ export function validateEnv() {
       throw new Error("COOKIE_SECURE=true is required in production.");
     }
 
-    if (env.REDIS_REQUIRED && (!env.REDIS_ENABLED || !env.REDIS_URL)) {
-      throw new Error("REDIS_ENABLED=true and REDIS_URL are required when REDIS_REQUIRED=true in production.");
+    const hasRedisTransport = Boolean(env.REDIS_URL || (env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN));
+    if (env.REDIS_REQUIRED && (!env.REDIS_ENABLED || !hasRedisTransport)) {
+      throw new Error("REDIS_ENABLED=true and REDIS_URL or UPSTASH_REDIS_REST_URL/TOKEN are required when REDIS_REQUIRED=true in production.");
     }
 
     if (env.SIGHTENGINE_ENABLED && (!env.SIGHTENGINE_API_USER || !env.SIGHTENGINE_API_SECRET)) {
@@ -309,13 +330,21 @@ export function validateEnv() {
   if (productionLocalHttp) {
     warnings.push("Production-style local HTTP detected; allowing COOKIE_SECURE=false only for localhost/127.0.0.1.");
   }
-  if (env.REDIS_ENABLED && !env.REDIS_URL) warnings.push("REDIS_ENABLED=true but REDIS_URL is missing; using memory fallback.");
+  if (env.REDIS_ENABLED && !env.REDIS_URL && !(env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN)) {
+    warnings.push("REDIS_ENABLED=true but no REDIS_URL or UPSTASH_REDIS_REST_URL/TOKEN is configured; using memory fallback.");
+  }
   if (env.REDIS_REQUIRED && !env.REDIS_ENABLED) warnings.push("REDIS_REQUIRED=true but REDIS_ENABLED=false.");
   if (env.SIGHTENGINE_ENABLED && (!env.SIGHTENGINE_API_USER || !env.SIGHTENGINE_API_SECRET)) {
     warnings.push("SIGHTENGINE_ENABLED=true but credentials are missing; moderation falls back locally.");
   }
-  if (env.EMAIL_ENABLED && !process.env.SMTP_HOST) warnings.push("EMAIL_ENABLED=true but SMTP_HOST is missing; email may fall back locally.");
+  if (env.EMAIL_ENABLED && env.EMAIL_PROVIDER === "resend" && !env.RESEND_API_KEY) {
+    warnings.push("EMAIL_PROVIDER=resend but RESEND_API_KEY is missing; email will not send.");
+  }
+  if (env.EMAIL_ENABLED && env.EMAIL_PROVIDER !== "resend" && !process.env.SMTP_HOST && !env.RESEND_API_KEY) {
+    warnings.push("EMAIL_ENABLED=true but no SMTP_HOST or RESEND_API_KEY is configured; email may fall back locally.");
+  }
   if (env.TURN_ENABLED && !env.TURN_URL) warnings.push("TURN_ENABLED=true but TURN_URL is missing.");
+  if (env.GEMINI_ENABLED && !env.GEMINI_API_KEY) warnings.push("GEMINI_ENABLED=true but GEMINI_API_KEY is missing; local bot fallback will be used.");
 
   return warnings;
 }

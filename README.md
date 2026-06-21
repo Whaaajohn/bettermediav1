@@ -2,6 +2,34 @@
 
 Better Media is a local-first social platform for communities, creators, language learners, and small private networks. It includes social posts, messaging, calls, moderation tools, an admin panel, language groups, and optional production services like MongoDB, Redis, SMTP, TURN, object storage, Sightengine, and Ollama.
 
+## One-Click Docker
+
+Double-click `Start Better Media Docker.cmd`, or create/start the `better-media` Compose app with:
+
+```bash
+docker compose up --build --force-recreate -d
+```
+
+Docker Desktop shows the project as `better-media`. The single `better-media` container serves the frontend, backend, realtime features, and admin panel. Every container start refreshes dependencies and rebuilds the frontend so stopped-container changes are picked up when you click Start.
+
+- App: `http://localhost:5174`
+- Admin: `http://localhost:5175/admin`
+- Health: `http://localhost:5174/api/health`
+
+For real hosting, follow [PRODUCTION_LAUNCH.md](PRODUCTION_LAUNCH.md). It covers the frontend host, backend host, MongoDB Atlas, Redis, SMTP/Gmail, uploads, calls, moderation, and go-live checks.
+
+### Gemini ModBot
+
+Gemini powers ModBot replies, structured moderation, appeals, and image review when a key is configured. Local rules, Hugging Face, and Ollama remain available as fallbacks.
+
+Create an ignored root `.env` file from `.env.example`, then add your Gemini API key:
+
+```env
+GEMINI_API_KEY=your-key
+```
+
+Restart `better-media` in Docker. The API key stays server-side and is never sent to the browser.
+
 The project is designed to run locally during development without paid API keys, while still leaving a clear path for self-hosted or cloud production deployments.
 
 ---
@@ -200,6 +228,8 @@ Local data is stored inside the backend project folders and is ignored by Git.
 
 ## Production Notes
 
+For the current free-tier internet setup, follow [PRODUCTION_LAUNCH.md](./PRODUCTION_LAUNCH.md). It uses one Render Docker web service, MongoDB Atlas, Resend email, optional Upstash Redis, and Mongo-backed uploads.
+
 Production deployments should use:
 
 - `NODE_ENV=production`
@@ -208,10 +238,10 @@ Production deployments should use:
 - a strong JWT secret
 - secure cookies
 - a strict CORS origin list
-- SMTP for account email flows
+- Resend/API email on Render Free, or SMTP only on hosts that allow SMTP ports
 - Redis for scaling, rate limits, queues, and realtime state
 - TURN for reliable calls across strict networks
-- object storage for uploaded media
+- Mongo-backed uploads or object storage for uploaded media
 
 Production should not run from local JSON storage.
 

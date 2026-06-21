@@ -3,10 +3,13 @@ import { Link } from "react-router";
 import {
   BookOpenIcon,
   HeartHandshakeIcon,
+  InstagramIcon,
+  MailIcon,
   ShieldCheckIcon,
-  ShipWheelIcon,
   UsersRoundIcon,
 } from "lucide-react";
+import useCurrentYear from "../hooks/useCurrentYear.js";
+import useSiteSettings from "../hooks/useSiteSettings.js";
 
 const appName = "BetterMedia";
 
@@ -25,6 +28,11 @@ const docTabs = [
     label: "Safety",
     to: "/docs#safety",
     icon: ShieldCheckIcon,
+  },
+  {
+    label: "Support",
+    to: "/support",
+    icon: MailIcon,
   },
   {
     label: "Docs",
@@ -51,11 +59,11 @@ function LogoLink({ compact = false }) {
       aria-label={`${appName} home`}
     >
       <span className="grid size-9 shrink-0 place-items-center rounded-2xl bg-primary/10 text-primary transition group-hover:bg-primary/15">
-        <ShipWheelIcon className="size-5" />
+        <UsersRoundIcon className="size-5" />
       </span>
 
       {!compact && (
-        <span className="truncate text-xl font-bold tracking-tight">
+        <span className="truncate text-lg font-bold tracking-tight sm:text-xl">
           {appName}
         </span>
       )}
@@ -97,13 +105,13 @@ export function AuthHeader({
   const trailingSlot = trailing || rightSlot;
 
   return (
-    <header className="sticky top-0 z-30 border-b border-base-300/70 bg-base-100/85 backdrop-blur-xl">
-      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8">
+    <header className="sticky top-0 z-30 max-w-[100vw] overflow-hidden border-b border-base-300/70 bg-base-100/85 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 min-w-0 max-w-7xl items-center justify-between gap-2 px-4 sm:gap-3 sm:px-6 lg:px-8">
         <LogoLink />
 
         <DocsNav className="hidden md:flex" />
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex min-w-0 shrink-0 items-center gap-1.5 sm:gap-2">
           {trailingSlot && (
             <div className="hidden items-center md:flex">{trailingSlot}</div>
           )}
@@ -121,7 +129,7 @@ export function AuthHeader({
             <div className="flex items-center md:hidden">{trailingSlot}</div>
           )}
 
-          {showAction && actionTo && (
+          {showAction && actionTo && !trailingSlot && (
             <Link
               to={actionTo}
               className="inline-flex h-9 items-center rounded-full px-3 text-sm font-semibold text-base-content/70 transition hover:bg-base-200 hover:text-base-content md:hidden"
@@ -136,6 +144,10 @@ export function AuthHeader({
 }
 
 export function AuthFooter() {
+  const currentYear = useCurrentYear();
+  const { settings } = useSiteSettings();
+  const hasInstagram = Boolean(settings.instagramUrl && settings.instagramHandle);
+
   return (
     <footer className="border-t border-base-300/70 bg-base-100">
       <div className="mx-auto max-w-7xl px-4 py-7 sm:px-6 lg:px-8">
@@ -145,14 +157,35 @@ export function AuthFooter() {
               <LogoLink compact />
               <span className="font-semibold tracking-tight">{appName}</span>
               <span className="text-sm text-base-content/40">
-                © {new Date().getFullYear()}
+                &copy; {currentYear}
               </span>
             </div>
 
             <p className="mt-3 text-sm leading-6 text-base-content/45">
-              Built for private communities, language practice, messaging,
-              calls, moderation, local testing, and production-ready hosting.
+              {settings.footerBlurb}
             </p>
+
+            <div className="mt-3 flex flex-wrap gap-2 text-sm">
+              <a
+                className="inline-flex items-center gap-1.5 rounded-full text-base-content/50 transition hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                href={`mailto:${settings.supportEmail}`}
+              >
+                <MailIcon className="size-3.5" />
+                {settings.supportEmail}
+              </a>
+
+              {hasInstagram && (
+                <a
+                  className="inline-flex items-center gap-1.5 rounded-full text-base-content/50 transition hover:text-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/25"
+                  href={settings.instagramUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <InstagramIcon className="size-3.5" />
+                  @{settings.instagramHandle}
+                </a>
+              )}
+            </div>
           </div>
 
           <nav

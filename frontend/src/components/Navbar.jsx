@@ -2,14 +2,14 @@ import { Link, useLocation } from "react-router";
 import { createElement } from "react";
 import {
   BellIcon,
-  BotIcon,
   HomeIcon,
+  LifeBuoyIcon,
   LogOutIcon,
   MessageCircleIcon,
   SearchIcon,
   SettingsIcon,
-  ShipWheelIcon,
   UserIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 
 import useAuthUser from "../hooks/useAuthUser";
@@ -118,7 +118,7 @@ function MobileProfileMenu({ avatarSrc, authUser, logoutMutation }) {
 
         <li>
           <Link to="/bot" onClick={closeDropdown}>
-            <BotIcon className="size-4" />
+            <LifeBuoyIcon className="size-4" />
             ModBot
           </Link>
         </li>
@@ -172,7 +172,7 @@ const Navbar = () => {
               to="/"
               className="flex min-w-0 items-center gap-2 rounded-2xl px-2 py-1.5 transition hover:bg-base-200/70 lg:hidden"
             >
-              <ShipWheelIcon className="size-8 shrink-0 text-primary" />
+              <UsersRoundIcon className="size-8 shrink-0 text-primary" />
 
               <div className="min-w-0">
                 <p className="truncate text-lg font-bold tracking-tight">
@@ -203,7 +203,7 @@ const Navbar = () => {
             <TopIconLink
               to="/bot"
               label="ModBot"
-              icon={BotIcon}
+              icon={LifeBuoyIcon}
               active={isActivePath(pathname, "/bot")}
             />
 

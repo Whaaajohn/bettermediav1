@@ -1,0 +1,130 @@
+services:
+  - type: web
+    name: better-media
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOCAL_DEV
+        value: "false"
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "5174"
+      - key: ADMIN_PORT
+        value: "5175"
+      - key: API_BASE_URL
+        value: https://better-media.onrender.com
+      - key: CLIENT_URL
+        value: https://better-media.onrender.com
+      - key: CORS_ORIGINS
+        value: https://better-media.onrender.com
+      - key: TRUST_PROXY
+        value: "true"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAME_SITE
+        value: lax
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: BOT_USERNAME
+        value: modbot
+      - key: BOT_PASSWORD
+        generateValue: true
+      - key: BOT_EMAIL
+        value: modbot@bettermedia.local
+      - key: DB_DRIVER
+        value: mongo
+      - key: MONGO_MODE
+        value: atlas
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_MIGRATE_FROM_LOCAL_JSON
+        value: "false"
+      - key: AUTO_BACKUP_DB
+        value: "false"
+      - key: UPLOAD_DRIVER
+        value: mongo
+      - key: PUBLIC_UPLOAD_URL
+        value: https://better-media.onrender.com/uploads
+      - key: MAX_UPLOAD_MB
+        value: "25"
+      - key: REDIS_ENABLED
+        value: "true"
+      - key: REDIS_REQUIRED
+        value: "false"
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: UPSTASH_REDIS_TIMEOUT_MS
+        value: "10000"
+      - key: REDIS_PREFIX
+        value: bettermedia:
+      - key: USE_REDIS_SOCKET_ADAPTER
+        value: "false"
+      - key: REDIS_SOCKET_ADAPTER
+        value: "false"
+      - key: REDIS_RATE_LIMITS
+        value: "true"
+      - key: REDIS_QUEUES
+        value: "false"
+      - key: EMAIL_ENABLED
+        value: "true"
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_API_URL
+        value: https://api.resend.com/emails
+      - key: MAIL_FROM_NAME
+        value: BetterMedia
+      - key: MAIL_FROM_EMAIL
+        sync: false
+      - key: DEV_PRINT_EMAIL_CODES
+        value: "false"
+      - key: LOGIN_ALERT_EMAILS
+        value: "true"
+      - key: MODERATION_ENABLED
+        value: "true"
+      - key: BOT_ENGINE_ENABLED
+        value: "true"
+      - key: BOT_LOCAL_AI_ENABLED
+        value: "false"
+      - key: LOCAL_AI_ENABLED
+        value: "false"
+      - key: LOCAL_AI_HF_ENABLED
+        value: "false"
+      - key: OLLAMA_ENABLED
+        value: "false"
+      - key: GEMINI_ENABLED
+        value: "true"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_VISION_MODEL
+        value: gemini-2.5-flash
+      - key: SIGHTENGINE_ENABLED
+        value: "false"
+      - key: SOCKET_IO_ENABLED
+        value: "true"
+      - key: CALL_SIGNALING_ENABLED
+        value: "true"
+      - key: TURN_ENABLED
+        value: "false"
+      - key: LOG_HTTP
+        value: "true"
+      - key: LOG_SOCKET
+        value: "true"

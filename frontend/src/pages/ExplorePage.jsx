@@ -6,7 +6,6 @@ import {
   ClockIcon,
   Globe2Icon,
   SearchIcon,
-  SparklesIcon,
   UsersRoundIcon,
   XIcon,
 } from "lucide-react";
@@ -209,7 +208,7 @@ export default function ExplorePage() {
       <div className="mx-auto max-w-4xl space-y-5">
         <header>
           <div className="inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 px-3 py-1 text-xs text-base-content/55">
-            <SparklesIcon className="size-3.5" />
+            <UsersRoundIcon className="size-3.5" />
             Discover people
           </div>
 

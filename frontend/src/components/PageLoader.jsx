@@ -1,4 +1,4 @@
-import { LoaderIcon, ShipWheelIcon } from "lucide-react";
+import { LoaderIcon, UsersRoundIcon } from "lucide-react";
 import { useThemeStore } from "../store/useThemeStore";
 
 const PageLoader = ({ label = "Loading BetterMedia..." }) => {
@@ -16,7 +16,7 @@ const PageLoader = ({ label = "Loading BetterMedia..." }) => {
         <div className="relative grid size-20 place-items-center rounded-[1.6rem] border border-base-300 bg-base-100 shadow-sm">
           <div className="absolute inset-0 rounded-[1.6rem] bg-primary/5" />
 
-          <ShipWheelIcon className="size-9 text-primary" />
+          <UsersRoundIcon className="size-9 text-primary" />
 
           <LoaderIcon className="absolute -right-2 -top-2 size-6 animate-spin rounded-full bg-base-100 p-1 text-primary shadow-sm" />
         </div>

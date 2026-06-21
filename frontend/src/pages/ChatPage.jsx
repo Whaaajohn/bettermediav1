@@ -15,7 +15,6 @@ import {
   SearchIcon,
   SendIcon,
   SmilePlusIcon,
-  SparklesIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -44,6 +43,19 @@ import { fileToDataUrl, makeLocalAvatar } from "../lib/utils";
 
 const KLIPY_ATTRIBUTION_URL = "https://klipy.com";
 const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥"];
+
+const CHAT_BUBBLE_STYLES = new Set([
+  "classic",
+  "soft",
+  "polished",
+  "ink",
+  "neon",
+  "warm",
+]);
+
+function getChatBubbleStyle(value) {
+  return CHAT_BUBBLE_STYLES.has(value) ? value : "classic";
+}
 
 function getMessageSenderId(message) {
   return message?.sender?._id || message?.sender || message?.senderId || "";
@@ -206,7 +218,7 @@ function KlipyPicker({
       <div className="flex items-center justify-between border-b border-base-300 px-3 py-3">
         <div className="flex items-center gap-2">
           <div className="grid size-8 place-items-center rounded-full bg-base-200 text-base-content/60">
-            <SparklesIcon className="size-4" />
+            <SmilePlusIcon className="size-4" />
           </div>
 
           <div>
@@ -780,9 +792,15 @@ const ChatPage = () => {
   const authAvatar =
     authUser?.profilePic ||
     makeLocalAvatar(authUser?.fullName || authUser?.username || "You");
+  const chatBubbleStyle = getChatBubbleStyle(authUser?.chatBubbleStyle);
 
   return (
-    <div className="flex h-[calc(100dvh-4rem)] flex-col bg-base-100">
+    <div
+      className={[
+        "flex h-[calc(100dvh-4rem)] flex-col bg-base-100",
+        `bm-chat-bubbles-${chatBubbleStyle}`,
+      ].join(" ")}
+    >
       <header className="flex min-h-16 items-center justify-between gap-3 border-b border-base-300 px-3 sm:px-6">
         <div className="flex min-w-0 items-center gap-3">
           <Link
@@ -986,10 +1004,10 @@ const ChatPage = () => {
 
                   <div
                     className={[
-                      "rounded-[1.2rem] px-3 py-2 text-sm shadow-sm",
+                      "bm-chat-bubble rounded-[1.2rem] px-3 py-2 text-sm shadow-sm",
                       isMine
-                        ? "rounded-br-md bg-primary text-primary-content"
-                        : "rounded-bl-md bg-base-200 text-base-content",
+                        ? "bm-chat-bubble-mine rounded-br-md bg-primary text-primary-content"
+                        : "bm-chat-bubble-other rounded-bl-md bg-base-200 text-base-content",
                     ].join(" ")}
                   >
                     {!isDeleted && message.replyToMessage && (

@@ -7,7 +7,6 @@ import {
   Globe2Icon,
   LanguagesIcon,
   LoaderIcon,
-  SparklesIcon,
   TargetIcon,
 } from "lucide-react";
 import toast from "react-hot-toast";
@@ -148,7 +147,7 @@ export default function OnboardingInterestsPage() {
 
               <div className="relative">
                 <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 px-3 py-1 text-xs font-medium text-base-content/55">
-                  <SparklesIcon className="size-3.5" />
+                  <TargetIcon className="size-3.5" />
                   Better recommendations
                 </div>
 
@@ -189,7 +188,7 @@ export default function OnboardingInterestsPage() {
         <section className="w-full rounded-[1.75rem] border border-base-300 bg-base-100 p-5 shadow-sm sm:p-7">
           <div className="mb-6">
             <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 px-3 py-1 text-xs font-medium text-base-content/55">
-              <SparklesIcon className="size-3.5" />
+              <TargetIcon className="size-3.5" />
               Tune your For You feed
             </div>
 

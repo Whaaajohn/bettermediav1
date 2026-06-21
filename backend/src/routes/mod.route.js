@@ -27,6 +27,7 @@ import {
   resolveReport,
   runMigrationDryRun,
   sendSmtpTest,
+  testGemini,
   sendStaffNotification,
   testMongo,
   testOllama,
@@ -57,6 +58,7 @@ router.post("/admin/test/sightengine-text", testSightengineText);
 router.post("/admin/test/sightengine-image", testSightengineImage);
 router.post("/admin/test/upload", testUpload);
 router.post("/admin/test/ollama", testOllama);
+router.post("/admin/test/gemini", testGemini);
 router.post("/admin/migration/dry-run", runMigrationDryRun);
 router.get("/bot", getBotModeration);
 router.get("/bot/admin", getBotModeration);

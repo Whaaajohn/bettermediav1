@@ -1,0 +1,39 @@
+name: better-media
+
+services:
+  better-media:
+    container_name: better-media
+    image: better-media:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5174:5174"
+      - "5175:5175"
+    env_file:
+      - ./docker/backend.env
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - .:/app
+      - better-media-backend-modules:/app/backend/node_modules
+      - better-media-frontend-modules:/app/frontend/node_modules
+      - better-media-npm-cache:/root/.npm
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5174/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+
+volumes:
+  better-media-backend-modules:
+  better-media-frontend-modules:
+  better-media-npm-cache:

@@ -13,6 +13,7 @@ import {
   HeartHandshakeIcon,
   HomeIcon,
   InfoIcon,
+  LifeBuoyIcon,
   LockKeyholeIcon,
   MailCheckIcon,
   MessageCircleIcon,
@@ -21,8 +22,6 @@ import {
   ServerIcon,
   SettingsIcon,
   ShieldCheckIcon,
-  ShipWheelIcon,
-  SparklesIcon,
   UserRoundIcon,
   UsersRoundIcon,
   XIcon,
@@ -315,7 +314,7 @@ const sections = [
   {
     id: "media-bot",
     label: "Media bot",
-    icon: SparklesIcon,
+    icon: LifeBuoyIcon,
     title: "MEDIA ModBot",
     description:
       "The local bot is a constrained helper for moderation, language practice, reporting, and account safety.",
@@ -559,7 +558,7 @@ export default function DocsPage() {
       <header className="border-b border-base-300 bg-base-100/85 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6 lg:px-8">
           <Link to="/" className="flex min-w-0 items-center gap-2">
-            <ShipWheelIcon className="size-8 shrink-0 text-primary" />
+            <UsersRoundIcon className="size-8 shrink-0 text-primary" />
             <div className="min-w-0">
               <p className="truncate text-lg font-bold tracking-tight">
                 BetterMedia
@@ -615,7 +614,7 @@ export default function DocsPage() {
         <section className="min-w-0 space-y-5">
           <div className="rounded-[1.8rem] border border-base-300 bg-base-100 p-5 shadow-sm sm:p-7">
             <div className="inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/70 px-3 py-1 text-xs text-base-content/55">
-              <SparklesIcon className="size-3.5" />
+              <HeartHandshakeIcon className="size-3.5" />
               BetterMedia Help Center
             </div>
 

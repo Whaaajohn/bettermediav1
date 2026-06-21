@@ -30,3 +30,563 @@
     @apply rounded-lg border border-base-300 bg-base-100 shadow-sm;
   }
 }
+
+.bettermedia-app-shell {
+  position: relative;
+  isolation: isolate;
+  overflow-x: clip;
+  transition:
+    background-color 260ms ease,
+    color 260ms ease;
+}
+
+.bettermedia-app-shell > :not(.bm-seasonal-layer) {
+  position: relative;
+  z-index: 1;
+}
+
+.bm-design-motion-calm {
+  --bm-motion-speed: 22s;
+  --bm-motion-distance: 8rem;
+}
+
+.bm-design-motion-lively {
+  --bm-motion-speed: 12s;
+  --bm-motion-distance: 12rem;
+}
+
+.bm-design-motion-off {
+  --bm-motion-speed: 0s;
+  --bm-motion-distance: 0;
+}
+
+.bm-design-christmas {
+  --p: 158 46% 34%;
+  --pc: 0 0% 100%;
+  --s: 356 70% 48%;
+  --sc: 0 0% 100%;
+  --a: 43 92% 58%;
+  --ac: 220 30% 10%;
+  --b1: 210 38% 98%;
+  --b2: 203 42% 94%;
+  --b3: 203 34% 84%;
+  --bc: 220 34% 14%;
+  background:
+    radial-gradient(circle at 12% 4%, hsl(158 70% 82% / 0.45), transparent 26rem),
+    radial-gradient(circle at 86% 12%, hsl(356 86% 83% / 0.38), transparent 22rem),
+    hsl(var(--b1));
+}
+
+.bm-design-halloween {
+  --p: 27 96% 55%;
+  --pc: 0 0% 100%;
+  --s: 278 70% 61%;
+  --sc: 0 0% 100%;
+  --a: 46 96% 60%;
+  --ac: 260 26% 8%;
+  --b1: 260 28% 8%;
+  --b2: 260 22% 12%;
+  --b3: 262 18% 22%;
+  --bc: 36 34% 92%;
+  background:
+    radial-gradient(circle at 16% 0%, hsl(27 96% 55% / 0.22), transparent 24rem),
+    radial-gradient(circle at 84% 8%, hsl(278 80% 62% / 0.18), transparent 22rem),
+    linear-gradient(135deg, hsl(260 28% 8%), hsl(270 34% 10%) 48%, hsl(24 34% 9%));
+}
+
+.bm-design-black-history {
+  --p: 43 86% 48%;
+  --pc: 35 45% 8%;
+  --s: 135 45% 32%;
+  --sc: 0 0% 100%;
+  --a: 0 68% 42%;
+  --ac: 0 0% 100%;
+  --b1: 38 36% 96%;
+  --b2: 39 30% 91%;
+  --b3: 37 22% 80%;
+  --bc: 30 26% 10%;
+  background:
+    linear-gradient(135deg, hsl(43 80% 88% / 0.42), transparent 28rem),
+    radial-gradient(circle at 85% 5%, hsl(135 45% 42% / 0.18), transparent 22rem),
+    hsl(var(--b1));
+}
+
+.bm-design-new-year {
+  --p: 43 92% 58%;
+  --pc: 223 44% 10%;
+  --s: 208 90% 58%;
+  --sc: 0 0% 100%;
+  --a: 288 82% 68%;
+  --ac: 0 0% 100%;
+  --b1: 223 44% 10%;
+  --b2: 223 36% 14%;
+  --b3: 221 28% 25%;
+  --bc: 42 36% 94%;
+  background:
+    radial-gradient(circle at 20% 0%, hsl(43 92% 58% / 0.22), transparent 24rem),
+    radial-gradient(circle at 88% 12%, hsl(208 90% 58% / 0.2), transparent 24rem),
+    linear-gradient(135deg, hsl(223 44% 10%), hsl(232 42% 13%) 54%, hsl(250 44% 11%));
+}
+
+.bm-seasonal-layer {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.bm-seasonal-layer::before,
+.bm-seasonal-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.42;
+  filter: none;
+  transform: translate3d(0, 0, 0);
+}
+
+.bm-seasonal-particle {
+  position: absolute;
+  top: -4rem;
+  left: 50%;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 999px;
+  opacity: 0.66;
+  animation: bmSeasonFall var(--bm-motion-speed, 22s) linear infinite;
+}
+
+.bm-seasonal-particle:nth-child(1) { left: 6%; animation-delay: -2s; animation-duration: calc(var(--bm-motion-speed, 22s) * 0.86); }
+.bm-seasonal-particle:nth-child(2) { left: 18%; width: 0.35rem; height: 0.35rem; animation-delay: -7s; }
+.bm-seasonal-particle:nth-child(3) { left: 31%; animation-delay: -13s; animation-duration: calc(var(--bm-motion-speed, 22s) * 1.12); }
+.bm-seasonal-particle:nth-child(4) { left: 44%; width: 0.42rem; height: 0.42rem; animation-delay: -4s; }
+.bm-seasonal-particle:nth-child(5) { left: 57%; animation-delay: -9s; animation-duration: calc(var(--bm-motion-speed, 22s) * 0.74); }
+.bm-seasonal-particle:nth-child(6) { left: 69%; width: 0.7rem; height: 0.7rem; animation-delay: -15s; }
+.bm-seasonal-particle:nth-child(7) { left: 78%; animation-delay: -5s; animation-duration: calc(var(--bm-motion-speed, 22s) * 1.18); }
+.bm-seasonal-particle:nth-child(8) { left: 88%; width: 0.38rem; height: 0.38rem; animation-delay: -11s; }
+.bm-seasonal-particle:nth-child(9) { left: 96%; animation-delay: -1s; animation-duration: calc(var(--bm-motion-speed, 22s) * 0.92); }
+
+.bm-design-christmas .bm-seasonal-layer::before {
+  background:
+    linear-gradient(115deg, transparent 0 44%, hsl(356 78% 54% / 0.12) 44% 45%, transparent 45% 100%),
+    repeating-linear-gradient(90deg, hsl(158 52% 34% / 0.08) 0 1px, transparent 1px 4.2rem),
+    radial-gradient(circle at 18% 24%, hsl(158 70% 75% / 0.28), transparent 18rem),
+    radial-gradient(circle at 76% 20%, hsl(356 84% 78% / 0.24), transparent 16rem);
+}
+
+.bm-design-christmas .bm-seasonal-layer::after {
+  background:
+    radial-gradient(circle at 12% 22%, hsl(0 0% 100% / 0.95) 0 2px, transparent 2.4px),
+    radial-gradient(circle at 74% 18%, hsl(356 78% 58% / 0.58) 0 1.8px, transparent 2.2px),
+    radial-gradient(circle at 44% 72%, hsl(158 58% 42% / 0.48) 0 1.8px, transparent 2.2px);
+  background-size: 9rem 9rem, 13rem 13rem, 11rem 11rem;
+}
+
+.bm-design-christmas .bm-seasonal-particle {
+  background: hsl(0 0% 100% / 0.96);
+  box-shadow:
+    0 0 0 1px hsl(203 90% 92% / 0.85),
+    0 1px 0 hsl(203 40% 65% / 0.18);
+}
+
+.bm-design-christmas .bm-seasonal-particle:nth-child(3n) {
+  border-radius: 0.18rem;
+  background: linear-gradient(135deg, hsl(356 74% 54%), hsl(43 92% 66%));
+}
+
+.bm-design-christmas .bm-seasonal-particle:nth-child(4n) {
+  border-radius: 999px;
+  background: hsl(158 52% 38% / 0.88);
+}
+
+.bm-design-halloween .bm-seasonal-layer::before {
+  background:
+    repeating-linear-gradient(135deg, hsl(27 96% 55% / 0.08) 0 1px, transparent 1px 32px),
+    radial-gradient(circle at 18% 18%, hsl(27 96% 55% / 0.24), transparent 14rem),
+    radial-gradient(circle at 82% 22%, hsl(278 80% 62% / 0.18), transparent 18rem);
+}
+
+.bm-design-halloween .bm-seasonal-layer::after {
+  background:
+    radial-gradient(circle at 12% 22%, hsl(43 96% 60% / 0.55) 0 2px, transparent 2.4px),
+    radial-gradient(circle at 84% 18%, hsl(27 96% 55% / 0.44) 0 2px, transparent 2.4px),
+    radial-gradient(circle at 62% 72%, hsl(278 70% 64% / 0.28) 0 1.5px, transparent 2px);
+  background-size: 12rem 12rem, 15rem 15rem, 10rem 10rem;
+}
+
+.bm-design-halloween .bm-seasonal-particle {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 0.24rem 0.24rem 0.7rem 0.7rem;
+  background: linear-gradient(135deg, hsl(27 96% 55% / 0.95), hsl(43 96% 60% / 0.9));
+  box-shadow:
+    0 0 0 1px hsl(27 96% 68% / 0.32),
+    0 8px 18px hsl(27 96% 12% / 0.3);
+  filter: none;
+  animation-name: bmSeasonDrift;
+}
+
+.bm-design-black-history .bm-seasonal-layer::before {
+  background:
+    linear-gradient(90deg, hsl(0 68% 42% / 0.11) 0 14%, transparent 14% 36%, hsl(43 86% 48% / 0.13) 36% 43%, transparent 43% 72%, hsl(135 45% 32% / 0.11) 72% 100%),
+    repeating-linear-gradient(135deg, hsl(0 65% 42% / 0.11) 0 1px, transparent 1px 22px),
+    repeating-linear-gradient(45deg, hsl(135 45% 30% / 0.1) 0 1px, transparent 1px 24px);
+}
+
+.bm-design-black-history .bm-seasonal-layer::after {
+  background:
+    radial-gradient(circle at 16% 22%, hsl(43 86% 48% / 0.48) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 82% 18%, hsl(0 68% 42% / 0.32) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 48% 76%, hsl(135 45% 32% / 0.35) 0 2px, transparent 2.5px);
+  background-size: 12rem 12rem, 15rem 15rem, 10rem 10rem;
+}
+
+.bm-design-black-history .bm-seasonal-particle {
+  width: 0.8rem;
+  height: 0.8rem;
+  border: 2px solid hsl(43 86% 48% / 0.7);
+  background: hsl(43 86% 48% / 0.08);
+  border-radius: 0.18rem;
+  animation-name: bmSeasonFloat;
+}
+
+.bm-design-black-history .bm-seasonal-particle:nth-child(3n) {
+  border-color: hsl(0 68% 42% / 0.62);
+  transform: rotate(45deg);
+}
+
+.bm-design-black-history .bm-seasonal-particle:nth-child(4n) {
+  border-color: hsl(135 45% 32% / 0.65);
+}
+
+.bm-design-new-year .bm-seasonal-layer::before {
+  background:
+    linear-gradient(90deg, transparent 0 49%, hsl(43 92% 58% / 0.12) 49% 50%, transparent 50% 100%),
+    repeating-linear-gradient(135deg, hsl(208 90% 58% / 0.09) 0 1px, transparent 1px 30px),
+    radial-gradient(circle at 24% 18%, hsl(43 92% 58% / 0.26), transparent 16rem),
+    radial-gradient(circle at 78% 18%, hsl(208 90% 58% / 0.2), transparent 18rem);
+}
+
+.bm-design-new-year .bm-seasonal-layer::after {
+  background:
+    radial-gradient(circle at 18% 20%, hsl(43 92% 65% / 0.8) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 70% 26%, hsl(208 90% 64% / 0.62) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 46% 70%, hsl(288 82% 72% / 0.5) 0 1.5px, transparent 2px);
+  background-size: 8rem 8rem, 10rem 10rem, 13rem 13rem;
+}
+
+.bm-design-new-year .bm-seasonal-particle {
+  border-radius: 0.18rem;
+  background: linear-gradient(135deg, hsl(43 92% 62%), hsl(0 0% 100% / 0.8));
+  box-shadow:
+    0 0 0 1px hsl(43 92% 74% / 0.5),
+    0 10px 18px hsl(223 44% 4% / 0.22);
+  animation-name: bmSeasonFloat;
+}
+
+.bm-design-new-year .bm-seasonal-particle:nth-child(3n) {
+  border-radius: 999px;
+  background: hsl(208 90% 64% / 0.88);
+}
+
+.bm-design-new-year .bm-seasonal-particle:nth-child(4n) {
+  clip-path: polygon(50% 0, 62% 36%, 100% 50%, 62% 64%, 50% 100%, 38% 64%, 0 50%, 38% 36%);
+}
+
+.bm-design-motion-off .bm-seasonal-particle,
+.bm-design-motion-off .bm-seasonal-layer::before,
+.bm-design-motion-off .bm-seasonal-layer::after {
+  animation: none;
+  opacity: 0.24;
+}
+
+@keyframes bmSeasonFall {
+  from {
+    transform: translate3d(0, -8vh, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(var(--bm-motion-distance, 8rem), 112vh, 0) rotate(360deg);
+  }
+}
+
+@keyframes bmSeasonDrift {
+  from {
+    transform: translate3d(-3rem, 10vh, 0) rotate(-8deg);
+  }
+  to {
+    transform: translate3d(9rem, 112vh, 0) rotate(12deg);
+  }
+}
+
+@keyframes bmSeasonFloat {
+  from {
+    transform: translate3d(0, 105vh, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(var(--bm-motion-distance, 8rem), -10vh, 0) rotate(260deg);
+  }
+}
+
+.bm-design-preview {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.bm-design-preview::before,
+.bm-design-preview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.bm-design-preview-default::before {
+  background:
+    linear-gradient(135deg, hsl(var(--p) / 0.12), transparent 55%),
+    radial-gradient(circle at 76% 22%, hsl(var(--p) / 0.16) 0 3px, transparent 3.5px);
+  background-size: auto, 2.6rem 2.6rem;
+}
+
+.bm-design-preview-christmas::before {
+  background:
+    linear-gradient(120deg, transparent 0 42%, hsl(356 74% 54% / 0.18) 42% 47%, transparent 47% 100%),
+    radial-gradient(circle at 18% 26%, hsl(0 0% 100% / 0.98) 0 2px, transparent 2.4px),
+    radial-gradient(circle at 76% 62%, hsl(158 58% 38% / 0.42) 0 2px, transparent 2.4px);
+  background-size: auto, 2rem 2rem, 2.8rem 2.8rem;
+}
+
+.bm-design-preview-halloween::before {
+  background:
+    radial-gradient(circle at 74% 24%, hsl(43 96% 70% / 0.9) 0 0.78rem, transparent 0.82rem),
+    radial-gradient(circle at 20% 68%, hsl(27 96% 55% / 0.7) 0 2px, transparent 2.5px),
+    repeating-linear-gradient(135deg, hsl(27 96% 55% / 0.16) 0 1px, transparent 1px 1.4rem);
+  background-size: auto, 2.8rem 2.8rem, auto;
+}
+
+.bm-design-preview-black-history::before {
+  background:
+    linear-gradient(90deg, hsl(0 68% 42% / 0.28) 0 22%, transparent 22% 36%, hsl(43 86% 48% / 0.34) 36% 48%, transparent 48% 68%, hsl(135 45% 32% / 0.28) 68% 100%),
+    repeating-linear-gradient(135deg, hsl(30 26% 10% / 0.1) 0 1px, transparent 1px 0.9rem);
+}
+
+.bm-design-preview-new-year::before {
+  background:
+    radial-gradient(circle at 18% 24%, hsl(43 92% 65% / 0.88) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 74% 38%, hsl(208 90% 64% / 0.72) 0 2px, transparent 2.5px),
+    radial-gradient(circle at 54% 72%, hsl(288 82% 72% / 0.62) 0 2px, transparent 2.5px),
+    linear-gradient(90deg, transparent 0 49%, hsl(43 92% 58% / 0.2) 49% 50%, transparent 50% 100%);
+  background-size: 2.4rem 2.4rem, 3rem 3rem, 2.8rem 2.8rem, auto;
+}
+
+.bm-chat-bubble {
+  position: relative;
+  isolation: isolate;
+  max-width: min(32rem, 82vw);
+  border: 1px solid transparent;
+  line-height: 1.45;
+  overflow: visible;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+.bm-chat-bubble::before,
+.bm-chat-bubble::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+}
+
+.bm-chat-bubble::before {
+  inset: 1px;
+  z-index: 0;
+  border-radius: inherit;
+  opacity: 0;
+}
+
+.bm-chat-bubble::after {
+  bottom: 0.34rem;
+  z-index: -1;
+  width: 0.62rem;
+  height: 0.62rem;
+  border: inherit;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.bm-chat-bubble-mine::after {
+  right: -0.2rem;
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+}
+
+.bm-chat-bubble-other::after {
+  left: -0.2rem;
+  border-top-color: transparent;
+  border-right-color: transparent;
+}
+
+.bm-chat-bubble-swatch {
+  display: flex;
+  min-height: 4.8rem;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-radius: 1rem;
+  border: 1px solid hsl(var(--bc) / 0.08);
+  background:
+    linear-gradient(135deg, hsl(var(--b1) / 0.86), hsl(var(--b2) / 0.62)),
+    radial-gradient(circle at 20% 10%, hsl(var(--p) / 0.08), transparent 8rem);
+  padding: 0.65rem;
+}
+
+.bm-chat-bubble-swatch .bm-chat-bubble {
+  width: max-content;
+  max-width: 82%;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.72rem;
+  line-height: 1rem;
+}
+
+.bm-chat-bubble-swatch .bm-chat-bubble::after {
+  bottom: 0.18rem;
+  width: 0.4rem;
+  height: 0.4rem;
+}
+
+.bm-chat-bubble-swatch .bm-chat-bubble-mine {
+  align-self: flex-end;
+}
+
+.bm-chat-bubbles-classic .bm-chat-bubble {
+  border-color: hsl(var(--bc) / 0.08);
+  box-shadow: 0 8px 18px hsl(var(--bc) / 0.06);
+}
+
+.bm-chat-bubbles-classic .bm-chat-bubble-mine {
+  background: hsl(var(--p));
+  color: hsl(var(--pc));
+  border-color: hsl(var(--p) / 0.24);
+}
+
+.bm-chat-bubbles-classic .bm-chat-bubble-other {
+  background: linear-gradient(135deg, hsl(var(--b1)), hsl(var(--b2)));
+  color: hsl(var(--bc));
+}
+
+.bm-chat-bubbles-soft .bm-chat-bubble {
+  border-color: hsl(var(--bc) / 0.06);
+  border-radius: 1.5rem;
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.5) inset,
+    0 10px 24px hsl(var(--bc) / 0.06);
+}
+
+.bm-chat-bubbles-soft .bm-chat-bubble-mine {
+  background: linear-gradient(135deg, hsl(var(--p) / 0.9), hsl(var(--p) / 0.74));
+  color: hsl(var(--pc));
+}
+
+.bm-chat-bubbles-soft .bm-chat-bubble-other {
+  background: hsl(var(--b2) / 0.88);
+  color: hsl(var(--bc));
+}
+
+.bm-chat-bubbles-polished .bm-chat-bubble {
+  border-color: hsl(0 0% 100% / 0.22);
+  box-shadow:
+    0 1px 0 hsl(0 0% 100% / 0.25) inset,
+    0 14px 34px hsl(var(--bc) / 0.14);
+}
+
+.bm-chat-bubbles-polished .bm-chat-bubble::before {
+  opacity: 1;
+  background: linear-gradient(160deg, hsl(0 0% 100% / 0.22), transparent 44%);
+}
+
+.bm-chat-bubbles-polished .bm-chat-bubble-mine {
+  background: linear-gradient(135deg, hsl(var(--p)), hsl(var(--s)));
+  color: hsl(var(--pc));
+}
+
+.bm-chat-bubbles-polished .bm-chat-bubble-other {
+  background:
+    linear-gradient(135deg, hsl(var(--b1) / 0.96), hsl(var(--b2) / 0.96));
+  color: hsl(var(--bc));
+}
+
+.bm-chat-bubbles-ink .bm-chat-bubble {
+  border-color: hsl(var(--bc) / 0.14);
+  border-radius: 0.9rem;
+  box-shadow:
+    0 0 0 1px hsl(220 40% 2% / 0.08),
+    0 8px 18px hsl(220 40% 2% / 0.14);
+}
+
+.bm-chat-bubbles-ink .bm-chat-bubble-mine {
+  background:
+    linear-gradient(135deg, hsl(224 42% 12%), hsl(222 45% 18%));
+  color: hsl(42 36% 96%);
+}
+
+.bm-chat-bubbles-ink .bm-chat-bubble-other {
+  background: linear-gradient(135deg, hsl(var(--b2)), hsl(var(--b3) / 0.7));
+  color: hsl(var(--bc));
+}
+
+.bm-chat-bubbles-neon .bm-chat-bubble {
+  border-color: hsl(var(--p) / 0.42);
+  box-shadow:
+    0 0 0 1px hsl(var(--p) / 0.12),
+    0 0 0 4px hsl(var(--p) / 0.08),
+    0 12px 22px hsl(var(--p) / 0.12);
+}
+
+.bm-chat-bubbles-neon .bm-chat-bubble::before {
+  opacity: 1;
+  background:
+    linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.18), transparent);
+}
+
+.bm-chat-bubbles-neon .bm-chat-bubble-mine {
+  background: linear-gradient(135deg, hsl(var(--p)), hsl(var(--a)));
+  color: hsl(var(--pc));
+}
+
+.bm-chat-bubbles-neon .bm-chat-bubble-other {
+  background: linear-gradient(135deg, hsl(var(--b1)), hsl(var(--b2) / 0.72));
+  color: hsl(var(--bc));
+}
+
+.bm-chat-bubbles-warm .bm-chat-bubble {
+  border-color: hsl(25 70% 45% / 0.14);
+  border-radius: 1.28rem;
+  box-shadow:
+    0 1px 0 hsl(42 100% 92% / 0.6) inset,
+    0 10px 22px hsl(25 60% 20% / 0.1);
+}
+
+.bm-chat-bubbles-warm .bm-chat-bubble-mine {
+  background: linear-gradient(135deg, hsl(22 86% 56%), hsl(42 92% 60%));
+  color: hsl(30 35% 8%);
+}
+
+.bm-chat-bubbles-warm .bm-chat-bubble-other {
+  background:
+    linear-gradient(135deg, hsl(36 60% 94% / 0.96), hsl(31 72% 88% / 0.86));
+  color: hsl(28 28% 16%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bm-seasonal-particle,
+  .bm-seasonal-layer::before,
+  .bm-seasonal-layer::after,
+  .bm-chat-bubble {
+    animation: none !important;
+    transition: none !important;
+  }
+}

@@ -37,6 +37,7 @@ import {
 import { notifyBotAppealCreated, notifyBotReportCreated } from "../bots/index.js";
 import { getBotQueueStatus } from "../bots/botQueue.js";
 import { getOllamaHealthCache, runOllamaGenerate } from "../bots/services/ollamaClient.js";
+import { getGeminiStatus, runGeminiGenerate } from "../bots/services/geminiClient.js";
 import { modelForTask } from "../bots/services/ollamaRouter.js";
 import {
   getSightengineStatus,
@@ -93,6 +94,7 @@ export async function getAdminPanel(req, res) {
         healthy: !env.OLLAMA_ENABLED || ollama.some((item) => item.ok),
         models: ollama,
       },
+      gemini: getGeminiStatus(),
       ready: Boolean(getDatabaseStatus().connected && (!redis.required || redis.connected) && uploads.healthy),
     };
     res.status(200).json({
@@ -491,22 +493,22 @@ export async function sendSmtpTest(req, res) {
     const mail = await sendStaffEmail({
       to: req.user.email,
       name: req.user.fullName,
-      title: "SMTP test from MEDIA",
-      message: "This is a test email from your local MEDIA server. If you received it, Gmail SMTP is working on this PC.",
+      title: "Email test from BetterMedia",
+      message: "This is a test email from BetterMedia. If you received it, your configured email provider is working.",
       staffName: req.user.fullName,
     });
 
     res.status(200).json({
       success: mail.sent,
       mail,
-      message: mail.sent ? "SMTP test email sent." : mail.reason || "SMTP test did not send.",
+      message: mail.sent ? "Email test sent." : mail.reason || "Email test did not send.",
     });
   } catch (error) {
-    console.error("[LOCAL MOD] SMTP test failed:", error.message);
+    console.error("[LOCAL MOD] Email test failed:", error.message);
     res.status(200).json({
       success: false,
-      mail: { sent: false, reason: error.message || "SMTP failed" },
-      message: error.message || "SMTP test failed",
+      mail: { sent: false, reason: error.message || "Email failed" },
+      message: error.message || "Email test failed",
     });
   }
 }
@@ -619,6 +621,44 @@ export async function testOllama(req, res) {
     });
   } catch (error) {
     res.status(200).json({ success: false, message: error.message || "Ollama test failed", models: getOllamaHealthCache() });
+  }
+}
+
+export async function testGemini(req, res) {
+  try {
+    await assertAdminPanelAccess(req.user.id);
+    if (!env.GEMINI_ENABLED || !env.GEMINI_API_KEY) {
+      return res.status(200).json({
+        success: false,
+        status: getGeminiStatus(),
+        message: "Gemini is not enabled/configured.",
+      });
+    }
+
+    const result = await runGeminiGenerate({
+      task: "adminDiagnostic",
+      systemInstruction:
+        "You are BetterMedia ModBot. Reply with one short, safe sentence confirming moderation support is ready.",
+      prompt: "Confirm BetterMedia Gemini moderation diagnostics are working.",
+      temperature: 0.1,
+      maxOutputTokens: 48,
+      timeoutMs: Math.min(env.GEMINI_TIMEOUT_MS, 12000),
+    });
+
+    res.status(200).json({
+      success: Boolean(result.ok),
+      status: getGeminiStatus(),
+      model: result.modelUsed,
+      elapsedMs: result.elapsedMs,
+      response: result.ok ? result.response : "",
+      message: result.ok ? "Gemini test completed." : result.reason || "Gemini test failed.",
+    });
+  } catch (error) {
+    res.status(200).json({
+      success: false,
+      status: getGeminiStatus(),
+      message: error.message || "Gemini test failed",
+    });
   }
 }
 

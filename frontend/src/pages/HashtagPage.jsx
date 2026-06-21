@@ -6,7 +6,6 @@ import {
   HashIcon,
   LoaderIcon,
   RefreshCwIcon,
-  SparklesIcon,
   TrendingUpIcon,
   VolumeXIcon,
 } from "lucide-react";
@@ -355,7 +354,7 @@ export default function HashtagPage() {
 
               <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-base-content/55">
                 <span className="inline-flex items-center gap-1 rounded-full border border-base-300 bg-base-100 px-3 py-1">
-                  <SparklesIcon className="size-3.5" />
+                  <HashIcon className="size-3.5" />
                   {formatCount(data?.postCount || posts.length)} posts
                 </span>
 

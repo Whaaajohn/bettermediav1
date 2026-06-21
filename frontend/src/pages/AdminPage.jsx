@@ -8,6 +8,8 @@ import {
   DatabaseIcon,
   FileTextIcon,
   FlagIcon,
+  InstagramIcon,
+  LifeBuoyIcon,
   LoaderIcon,
   MailIcon,
   MessageSquareWarningIcon,
@@ -105,6 +107,45 @@ const tabs = [
   ["diagnostics", "Diagnostics", DatabaseIcon],
   ["settings", "Settings", SettingsIcon],
   ["create", "Create", SendIcon],
+];
+
+const siteDesignOptions = [
+  {
+    id: "default",
+    label: "Default",
+    description: "The normal clean BetterMedia design.",
+    preview: "bg-base-200 text-base-content",
+  },
+  {
+    id: "christmas",
+    label: "Christmas",
+    description: "Frosted winter light, red and green accents, calm snow motion.",
+    preview: "bg-emerald-100 text-emerald-900",
+  },
+  {
+    id: "halloween",
+    label: "Halloween",
+    description: "Dark smoky surfaces, orange glow, and spooky polished motion.",
+    preview: "bg-orange-950 text-orange-100",
+  },
+  {
+    id: "black-history",
+    label: "Black History",
+    description: "Respectful heritage palette with gold, red, green, and woven texture.",
+    preview: "bg-yellow-100 text-stone-950",
+  },
+  {
+    id: "new-year",
+    label: "New Year",
+    description: "Midnight blue, gold accents, and clean celebration shimmer.",
+    preview: "bg-slate-950 text-yellow-100",
+  },
+];
+
+const siteDesignMotionOptions = [
+  ["calm", "Calm motion"],
+  ["lively", "More animation"],
+  ["off", "No animation"],
 ];
 
 const botFields = [
@@ -484,7 +525,7 @@ function ModerationModal({
                   }
                   disabled={isBusy}
                 />
-                <span>Also send email if SMTP is configured</span>
+                <span>Also send email if an email provider is configured</span>
               </label>
 
               <button
@@ -680,6 +721,7 @@ export default function AdminPage() {
     queryClient.invalidateQueries({ queryKey: ["adminPanel"] });
     queryClient.invalidateQueries({ queryKey: ["authUser"] });
     queryClient.invalidateQueries({ queryKey: ["feed"] });
+    queryClient.invalidateQueries({ queryKey: ["siteSettings"] });
   };
 
   const { mutate: applyAction, isPending: actionPending } = useMutation({
@@ -823,14 +865,34 @@ export default function AdminPage() {
       toast.error(getApiErrorMessage(error, "Could not save admin settings")),
   });
 
+  const buildAdminSettingsPayload = (overrides = {}) => {
+    const next = {
+      ...settingsForm,
+      ...overrides,
+    };
+
+    return {
+      ...next,
+      defaultBanDays: Math.min(365, Math.max(1, Number(next.defaultBanDays) || 7)),
+      autoRefreshSeconds: Math.min(60, Math.max(3, Number(next.autoRefreshSeconds) || 5)),
+      reportCategories: splitLines(next.reportCategoriesText),
+    };
+  };
+
+  const activateSiteDesign = (siteDesignMode) => {
+    setSettingsDirty(false);
+    setSettingsForm((current) => ({ ...current, siteDesignMode }));
+    saveAdminSettings(buildAdminSettingsPayload({ siteDesignMode }));
+  };
+
   const { mutate: testSmtp, isPending: testingSmtp } = useMutation({
     mutationFn: sendSmtpTest,
     onSuccess: (data) => {
-      if (data?.success) toast.success("SMTP test email sent");
-      else toast.error(data?.message || data?.mail?.reason || "SMTP test did not send");
+      if (data?.success) toast.success("Email test sent");
+      else toast.error(data?.message || data?.mail?.reason || "Email test did not send");
       refresh();
     },
-    onError: (error) => toast.error(getApiErrorMessage(error, "SMTP test failed")),
+    onError: (error) => toast.error(getApiErrorMessage(error, "Email test failed")),
   });
 
   const { mutate: runDiagnostic, isPending: testingDiagnostic } = useMutation({
@@ -997,6 +1059,11 @@ export default function AdminPage() {
                   icon={BellIcon}
                 />
                 <Stat
+                  label="Open Tickets"
+                  value={counts.openSupportTickets || 0}
+                  icon={LifeBuoyIcon}
+                />
+                <Stat
                   label="Timed Bans"
                   value={counts.activeBans || 0}
                   icon={ShieldCheckIcon}
@@ -1023,14 +1090,16 @@ export default function AdminPage() {
                   <div className="flex items-center justify-between gap-3">
                     <h2 className="font-semibold">Email</h2>
                     <StatusPill tone={panel?.smtp?.configured ? "success" : "warning"}>
-                      SMTP {panel?.smtp?.configured ? "ready" : "off"}
+                      {panel?.smtp?.provider === "resend" ? "Resend" : "SMTP"} {panel?.smtp?.configured ? "ready" : "off"}
                     </StatusPill>
                   </div>
 
                   <p className="mt-2 text-sm text-base-content/55">
                     {panel?.smtp?.configured
-                      ? `${panel.smtp.fromEmail} via ${panel.smtp.host}`
-                      : "SMTP is off. Codes may print in the terminal."}
+                      ? panel.smtp.provider === "resend"
+                        ? `${panel.smtp.fromEmail} via Resend`
+                        : `${panel.smtp.fromEmail} via ${panel.smtp.host}`
+                      : "Email is off. Codes may print in the terminal."}
                   </p>
 
                   <button
@@ -1951,7 +2020,7 @@ export default function AdminPage() {
                         setMailForm({ ...mailForm, email: event.target.checked });
                       }}
                     />
-                    <span>Also send email if SMTP is configured</span>
+                    <span>Also send email if an email provider is configured</span>
                   </label>
 
                   <button
@@ -1981,7 +2050,56 @@ export default function AdminPage() {
               </SoftCard>
 
               <div className="space-y-3">
-                <h2 className="font-semibold">Outreach and email events</h2>
+                <h2 className="font-semibold">Support tickets</h2>
+
+                {(panel?.supportTickets || []).slice(0, 12).map((ticket) => (
+                  <SoftCard key={ticket._id} className="p-3 text-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">
+                          {ticket.ticketNumber} - {ticket.subject}
+                        </p>
+                        <p className="text-base-content/50">
+                          {ticket.name || "Visitor"} - {ticket.email} -{" "}
+                          {formatDate(ticket.createdAt)}
+                        </p>
+                      </div>
+                      <StatusPill
+                        tone={
+                          ticket.emailDelivery?.supportSent &&
+                          ticket.emailDelivery?.receiptSent
+                            ? "success"
+                            : "warning"
+                        }
+                      >
+                        {ticket.emailDelivery?.supportSent &&
+                        ticket.emailDelivery?.receiptSent
+                          ? "Emailed"
+                          : "Saved"}
+                      </StatusPill>
+                    </div>
+                    <p className="mt-2 text-base-content/60">
+                      {ticket.category}
+                      {ticket.username ? ` - @${ticket.username}` : ""}
+                    </p>
+                    <p className="mt-1 line-clamp-3 text-base-content/70">
+                      {ticket.details}
+                    </p>
+                    {(ticket.emailDelivery?.supportReason ||
+                      ticket.emailDelivery?.receiptReason) && (
+                      <p className="mt-2 text-xs text-warning">
+                        {ticket.emailDelivery.supportReason ||
+                          ticket.emailDelivery.receiptReason}
+                      </p>
+                    )}
+                  </SoftCard>
+                ))}
+
+                {(panel?.supportTickets || []).length === 0 && (
+                  <EmptyState icon={LifeBuoyIcon} title="No support tickets yet" />
+                )}
+
+                <h2 className="pt-2 font-semibold">Outreach and email events</h2>
 
                 {(panel?.outreachEvents || []).slice(0, 20).map((event) => (
                   <SoftCard key={event._id} className="p-3 text-sm">
@@ -2091,6 +2209,7 @@ export default function AdminPage() {
                         ["sightengine-image", "Test Sightengine image"],
                         ["upload", "Test upload"],
                         ["ollama", "Test Ollama"],
+                        ["gemini", "Test Gemini"],
                       ].map(([kind, label]) => (
                         <button
                           key={kind}
@@ -2111,7 +2230,7 @@ export default function AdminPage() {
                         onClick={() => testSmtp()}
                       >
                         {testingSmtp ? <LoaderIcon className="size-3 animate-spin" /> : null}
-                        Test SMTP
+                        Test email
                       </button>
 
                       <button
@@ -2200,6 +2319,23 @@ export default function AdminPage() {
                       </div>
 
                       <div className="rounded-2xl border border-base-300 bg-base-200/40 p-4">
+                        <p className="font-semibold">Gemini</p>
+                        <p className="mt-2 text-base-content/60">
+                          {diagnostics.gemini?.configured
+                            ? "Configured"
+                            : diagnostics.gemini?.enabled
+                              ? "Needs API key"
+                              : "Off"}
+                        </p>
+                        <p className="mt-1 text-xs text-base-content/45">
+                          Model: {diagnostics.gemini?.model || "gemini-2.5-flash"}
+                        </p>
+                        <p className="mt-2 text-xs text-base-content/45">
+                          Health checks: {(diagnostics.gemini?.health || []).length}
+                        </p>
+                      </div>
+
+                      <div className="rounded-2xl border border-base-300 bg-base-200/40 p-4">
                         <p className="font-semibold">Ollama and bot queue</p>
                         <p className="mt-2 text-base-content/60">
                           {diagnostics.ollama?.enabled
@@ -2246,11 +2382,15 @@ export default function AdminPage() {
                       <div className="rounded-2xl border border-base-300 bg-base-200/40 p-4">
                         <p className="font-semibold">Email</p>
                         <p className="mt-2 text-base-content/60">
-                          {smtp.configured ? "SMTP ready" : "Terminal fallback"}
+                          {smtp.configured
+                            ? `${smtp.provider === "resend" ? "Resend" : "SMTP"} ready`
+                            : "Terminal fallback"}
                         </p>
                         <p className="mt-1 text-xs text-base-content/45">
                           {smtp.configured
-                            ? `${smtp.fromEmail} via ${smtp.host}:${smtp.port}`
+                            ? smtp.provider === "resend"
+                              ? `${smtp.fromEmail} via Resend API`
+                              : `${smtp.fromEmail} via ${smtp.host}:${smtp.port}`
                             : "Codes and alerts can print locally."}
                         </p>
                       </div>
@@ -2281,6 +2421,193 @@ export default function AdminPage() {
                 <p className="mt-1 text-sm text-base-content/55">
                   Defaults used by moderation, reports, outreach, and refresh timing.
                 </p>
+
+                <div className="mt-4 rounded-[1.3rem] border border-base-300 bg-base-200/35 p-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <h3 className="font-semibold">One-click website design</h3>
+                      <p className="mt-1 max-w-2xl text-sm leading-6 text-base-content/55">
+                        Keep Default for the normal app. Switch the entire website for
+                        holidays, history months, and events without editing code.
+                      </p>
+                    </div>
+
+                    <select
+                      className="select select-bordered h-10 rounded-xl bg-base-100"
+                      value={settingsForm.siteDesignMotion || "calm"}
+                      onChange={(event) => {
+                        setSettingsDirty(true);
+                        setSettingsForm({
+                          ...settingsForm,
+                          siteDesignMotion: event.target.value,
+                        });
+                      }}
+                    >
+                      {siteDesignMotionOptions.map(([value, label]) => (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-5">
+                    {siteDesignOptions.map((option) => {
+                      const active = (settingsForm.siteDesignMode || "default") === option.id;
+
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          className={[
+                            "rounded-2xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md",
+                            active
+                              ? "border-primary bg-primary/10 ring-2 ring-primary/20"
+                              : "border-base-300 bg-base-100",
+                          ].join(" ")}
+                          onClick={() => activateSiteDesign(option.id)}
+                          disabled={savingSettings}
+                        >
+                          <div
+                            className={[
+                              "bm-design-preview grid h-20 place-items-center rounded-2xl text-sm font-bold shadow-inner",
+                              `bm-design-preview-${option.id}`,
+                              option.preview,
+                            ].join(" ")}
+                          >
+                            <span className="relative z-10">{option.label}</span>
+                          </div>
+
+                          <div className="mt-3 flex items-center justify-between gap-2">
+                            <p className="font-semibold">{option.label}</p>
+                            {active && <CheckCircle2Icon className="size-4 text-primary" />}
+                          </div>
+
+                          <p className="mt-1 text-xs leading-5 text-base-content/50">
+                            {option.description}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-2xl border border-base-300 bg-base-100 px-4 py-3 text-sm">
+                    <input
+                      type="checkbox"
+                      className="checkbox checkbox-primary checkbox-sm"
+                      checked={settingsForm.siteDesignDecorations !== false}
+                      onChange={(event) => {
+                        setSettingsDirty(true);
+                        setSettingsForm({
+                          ...settingsForm,
+                          siteDesignDecorations: event.target.checked,
+                        });
+                      }}
+                    />
+                    <span>Show seasonal background animations and polish</span>
+                  </label>
+                </div>
+
+                <div className="mt-4 rounded-[1.3rem] border border-primary/15 bg-primary/5 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="grid size-10 shrink-0 place-items-center rounded-2xl bg-primary/10 text-primary">
+                      <LifeBuoyIcon className="size-5" />
+                    </div>
+
+                    <div className="min-w-0">
+                      <h3 className="font-semibold">Public site contact</h3>
+                      <p className="mt-1 text-sm leading-6 text-base-content/55">
+                        These values power the footer and Support page for every visitor.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <label className="form-control">
+                      <span className="label-text mb-1">Support Gmail / email</span>
+                      <input
+                        className="input input-bordered rounded-xl"
+                        type="email"
+                        value={settingsForm.supportEmail || ""}
+                        onChange={(event) => {
+                          setSettingsDirty(true);
+                          setSettingsForm({
+                            ...settingsForm,
+                            supportEmail: event.target.value,
+                          });
+                        }}
+                        placeholder="support@your-domain.com"
+                      />
+                    </label>
+
+                    <label className="form-control">
+                      <span className="label-text mb-1">Support subject prefix</span>
+                      <input
+                        className="input input-bordered rounded-xl"
+                        value={settingsForm.supportSubjectPrefix || ""}
+                        onChange={(event) => {
+                          setSettingsDirty(true);
+                          setSettingsForm({
+                            ...settingsForm,
+                            supportSubjectPrefix: event.target.value,
+                          });
+                        }}
+                        placeholder="BetterMedia support"
+                      />
+                    </label>
+
+                    <label className="form-control">
+                      <span className="label-text mb-1">Instagram handle</span>
+                      <div className="relative">
+                        <InstagramIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-base-content/35" />
+                        <input
+                          className="input input-bordered w-full rounded-xl pl-9"
+                          value={settingsForm.instagramHandle || ""}
+                          onChange={(event) => {
+                            setSettingsDirty(true);
+                            setSettingsForm({
+                              ...settingsForm,
+                              instagramHandle: event.target.value,
+                            });
+                          }}
+                          placeholder="your_instagram"
+                        />
+                      </div>
+                    </label>
+
+                    <label className="form-control">
+                      <span className="label-text mb-1">Instagram URL</span>
+                      <input
+                        className="input input-bordered rounded-xl"
+                        value={settingsForm.instagramUrl || ""}
+                        onChange={(event) => {
+                          setSettingsDirty(true);
+                          setSettingsForm({
+                            ...settingsForm,
+                            instagramUrl: event.target.value,
+                          });
+                        }}
+                        placeholder="https://www.instagram.com/your_instagram/"
+                      />
+                    </label>
+                  </div>
+
+                  <label className="form-control mt-3">
+                    <span className="label-text mb-1">Footer blurb</span>
+                    <textarea
+                      className="textarea textarea-bordered min-h-20 rounded-xl"
+                      value={settingsForm.footerBlurb || ""}
+                      onChange={(event) => {
+                        setSettingsDirty(true);
+                        setSettingsForm({
+                          ...settingsForm,
+                          footerBlurb: event.target.value,
+                        });
+                      }}
+                      placeholder="Short sentence shown in the public footer"
+                    />
+                  </label>
+                </div>
 
                 <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2">
                   <label className="form-control">
@@ -2394,28 +2721,13 @@ export default function AdminPage() {
                         });
                       }}
                     />
-                    <span>Prefer email for staff outreach when SMTP is ready</span>
+                    <span>Prefer email for staff outreach when the email provider is ready</span>
                   </label>
 
                   <button
                     className="btn btn-primary rounded-xl"
                     disabled={savingSettings}
-                    onClick={() =>
-                      saveAdminSettings({
-                        ...settingsForm,
-                        defaultBanDays: Math.min(
-                          365,
-                          Math.max(1, Number(settingsForm.defaultBanDays) || 7)
-                        ),
-                        autoRefreshSeconds: Math.min(
-                          60,
-                          Math.max(3, Number(settingsForm.autoRefreshSeconds) || 5)
-                        ),
-                        reportCategories: splitLines(
-                          settingsForm.reportCategoriesText
-                        ),
-                      })
-                    }
+                    onClick={() => saveAdminSettings(buildAdminSettingsPayload())}
                   >
                     {savingSettings ? (
                       <LoaderIcon className="size-4 animate-spin" />
@@ -2428,6 +2740,27 @@ export default function AdminPage() {
               </SoftCard>
 
               <aside className="space-y-3">
+                <SoftCard className="p-4">
+                  <h3 className="font-semibold">Live public links</h3>
+                  <div className="mt-3 space-y-2 text-sm text-base-content/65">
+                    <p className="break-all">
+                      Support: {panel?.adminSettings?.supportEmail || "Not set"}
+                    </p>
+                    <p className="break-all">
+                      Instagram:{" "}
+                      {panel?.adminSettings?.instagramHandle
+                        ? `@${panel.adminSettings.instagramHandle}`
+                        : "Not set"}
+                    </p>
+                    <p className="line-clamp-3">
+                      Footer: {panel?.adminSettings?.footerBlurb || "Default footer text"}
+                    </p>
+                    <p>
+                      Design: {panel?.adminSettings?.siteDesignMode || "default"}
+                    </p>
+                  </div>
+                </SoftCard>
+
                 <SoftCard className="p-4">
                   <h3 className="font-semibold">Current defaults</h3>
                   <div className="mt-3 space-y-2 text-sm text-base-content/65">

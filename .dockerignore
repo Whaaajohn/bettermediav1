@@ -1,0 +1,14 @@
+.git
+.gitignore
+**/node_modules
+**/.npm-cache
+**/dist
+**/*.log
+backend/.env
+backend/.env.*
+backend/data
+backend/uploads
+data
+uploads
+desktop
+docs

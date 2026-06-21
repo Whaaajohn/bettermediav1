@@ -419,6 +419,16 @@ export async function getAdminPanel() {
   return response.data;
 }
 
+export async function getSiteSettings() {
+  const response = await axiosInstance.get("/site/settings");
+  return response.data;
+}
+
+export async function createSupportTicket(payload) {
+  const response = await axiosInstance.post("/site/support-tickets", payload);
+  return response.data;
+}
+
 export async function applyModerationAction(userId, action) {
   const response = await axiosInstance.post(`/mod/users/${userId}/action`, action);
   return response.data;

@@ -7,11 +7,10 @@ import {
   CheckCircle2Icon,
   EyeIcon,
   EyeOffIcon,
+  HeartHandshakeIcon,
   LockKeyholeIcon,
   MessageCircleIcon,
   ShieldCheckIcon,
-  ShipWheelIcon,
-  SparklesIcon,
   UsersRoundIcon,
 } from "lucide-react";
 
@@ -47,7 +46,7 @@ function ProductPreview() {
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="grid size-12 place-items-center rounded-full bg-primary/10 text-primary">
-              <ShipWheelIcon className="size-6" />
+              <UsersRoundIcon className="size-6" />
             </div>
 
             <div>
@@ -156,7 +155,7 @@ const LoginPage = () => {
           <div className="w-full max-w-md">
             <div className="mb-8">
               <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/60 px-3 py-1 text-xs font-medium text-base-content/60">
-                <SparklesIcon className="size-3.5" />
+                <HeartHandshakeIcon className="size-3.5" />
                 Welcome back
               </div>
 

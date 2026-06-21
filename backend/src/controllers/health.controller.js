@@ -5,6 +5,7 @@ import { getUploadHealth } from "../config/storage.js";
 import { getWorkerStatus } from "../config/workers.js";
 import { getSightengineStatus } from "../bots/services/sightengineService.js";
 import { getOllamaHealthCache, listOllamaModels } from "../bots/services/ollamaClient.js";
+import { getGeminiStatus } from "../bots/services/geminiClient.js";
 import { getBotQueueStatus } from "../bots/botQueue.js";
 import { getSmtpStatus } from "../lib/smtpMailer.js";
 
@@ -64,6 +65,7 @@ export async function ready(req, res) {
       models: ollamaHealth.length ? ollamaHealth : ollamaModels?.models || [],
       installed: ollamaModels?.installed || [],
     },
+    gemini: getGeminiStatus(),
     storage: uploads,
     uploads,
     smtp,

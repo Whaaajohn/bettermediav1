@@ -52,36 +52,78 @@ function smtpConfig() {
   };
 }
 
+function resendConfig() {
+  return {
+    apiKey: (process.env.RESEND_API_KEY || "").trim(),
+    apiUrl: process.env.RESEND_API_URL || "https://api.resend.com/emails",
+    fromEmail: (
+      process.env.MAIL_FROM_EMAIL ||
+      process.env.SMTP_FROM_EMAIL ||
+      process.env.SMTP_USER ||
+      ""
+    ).trim(),
+    fromName:
+      process.env.MAIL_FROM_NAME ||
+      process.env.SMTP_FROM_NAME ||
+      appName,
+    timeoutMs: Number(process.env.RESEND_TIMEOUT_MS || 15000),
+  };
+}
+
+function smtpIsConfigured(config = smtpConfig()) {
+  return Boolean(config.host && config.user && config.pass && config.fromEmail);
+}
+
+function resendIsConfigured(config = resendConfig()) {
+  return Boolean(config.apiKey && config.fromEmail);
+}
+
+function preferredEmailProvider({ smtpConfigured, resendConfigured }) {
+  const rawProvider = (process.env.EMAIL_PROVIDER || "").trim().toLowerCase();
+  if (rawProvider === "smtp" || rawProvider === "resend") return rawProvider;
+  if (resendConfigured) return "resend";
+  if (smtpConfigured) return "smtp";
+  return "smtp";
+}
+
 export function getSmtpStatus() {
   const config = smtpConfig();
+  const resend = resendConfig();
   const lastEvent = mailEvents[0] || null;
-  const enabled = booleanValue(process.env.SMTP_ENABLED ?? process.env.EMAIL_ENABLED, Boolean(config.user && config.pass));
+  const smtpConfigured = smtpIsConfigured(config);
+  const resendConfigured = resendIsConfigured(resend);
+  const provider = preferredEmailProvider({ smtpConfigured, resendConfigured });
+  const enabled = booleanValue(
+    process.env.EMAIL_ENABLED ?? process.env.SMTP_ENABLED,
+    Boolean(smtpConfigured || resendConfigured)
+  );
+  const configured = provider === "resend" ? resendConfigured : smtpConfigured;
 
   return {
     enabled,
-    configured: Boolean(
-      config.host &&
-        config.user &&
-        config.pass &&
-        config.fromEmail
-    ),
+    configured,
+    provider,
+    smtpConfigured,
+    resendConfigured,
     healthy: Boolean(
-      config.host &&
-        config.user &&
-        config.pass &&
-        config.fromEmail &&
+      enabled &&
+        configured &&
         (!lastEvent || lastEvent.sent || Date.now() - new Date(lastEvent.createdAt).getTime() > 5 * 60 * 1000)
     ),
     host: config.host,
     port: config.port,
     secure: config.secure,
     timeoutMs: config.timeoutMs,
-    fromEmail: config.fromEmail,
+    fromEmail: provider === "resend" ? resend.fromEmail : config.fromEmail,
+    smtpFromEmail: config.fromEmail,
+    resendFromEmail: resend.fromEmail,
+    resendApiUrl: resendConfigured ? resend.apiUrl : "",
     lastEvent: lastEvent
       ? {
+          provider: lastEvent.provider || "smtp",
           sent: lastEvent.sent,
           subject: lastEvent.subject,
-          reason: lastEvent.sent ? "" : lastEvent.reason || "SMTP failed",
+          reason: lastEvent.sent ? "" : lastEvent.reason || "Email failed",
           createdAt: lastEvent.createdAt,
         }
       : null,
@@ -111,7 +153,7 @@ const htmlEscape = (value = "") =>
   });
 
 function errorMessage(error) {
-  if (!error) return "Unknown SMTP error";
+  if (!error) return "Unknown email error";
 
   if (Array.isArray(error.errors) && error.errors.length > 0) {
     return error.errors
@@ -125,7 +167,7 @@ function errorMessage(error) {
     error.code ||
     error.reason ||
     String(error) ||
-    "Unknown SMTP error"
+    "Unknown email error"
   );
 }
 
@@ -330,6 +372,138 @@ ${message || ""}
 Sent by ${staffName || `${appName} staff`}. You can also review this message in your in-app notifications.`;
 }
 
+function makeSupportRows(ticket = {}) {
+  return [
+    ["Ticket", ticket.ticketNumber],
+    ["Category", ticket.category],
+    ["Subject", ticket.subject],
+    ["Name", ticket.name || "Not provided"],
+    ["Email", ticket.email],
+    ["Username", ticket.username ? `@${ticket.username}` : "Not provided"],
+    ["Created", ticket.createdAt],
+    ["IP address", ticket.ipAddress || "Not captured"],
+    ["Device/browser", ticket.userAgent || "Not captured"],
+  ];
+}
+
+function makeSupportTicketHtmlEmail({ ticket }) {
+  const rows = makeSupportRows(ticket);
+  const safeDetails = htmlEscape(ticket.details || "").replace(/\n/g, "<br>");
+  const safeSteps = htmlEscape(ticket.steps || "Not added.").replace(/\n/g, "<br>");
+
+  return makeEmailShell({
+    title: `New support ticket ${ticket.ticketNumber}`,
+    preview: `${ticket.name || ticket.email} opened a BetterMedia support ticket.`,
+    badge: "Support ticket",
+    accent: "#0f766e",
+    footerText:
+      "This support notification was created from the BetterMedia support page.",
+    children: `
+      <table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="border:1px solid #e5e7eb;border-radius:20px;overflow:hidden;">
+        ${rows
+          .map(
+            ([label, value]) => `
+              <tr>
+                <td style="padding:12px 14px;background:#f9fafb;border-bottom:1px solid #e5e7eb;color:#6b7280;font-size:13px;font-weight:700;width:34%;">
+                  ${htmlEscape(label)}
+                </td>
+                <td style="padding:12px 14px;border-bottom:1px solid #e5e7eb;color:#111827;font-size:13px;line-height:1.55;">
+                  ${htmlEscape(value || "Not provided")}
+                </td>
+              </tr>
+            `
+          )
+          .join("")}
+      </table>
+
+      <div style="margin-top:20px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:22px;padding:18px;">
+        <p style="margin:0 0 8px;color:#6b7280;font-size:12px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;">
+          Problem
+        </p>
+        <p style="margin:0;color:#111827;font-size:15px;line-height:1.7;">
+          ${safeDetails || "No details provided."}
+        </p>
+      </div>
+
+      <div style="margin-top:14px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:22px;padding:18px;">
+        <p style="margin:0 0 8px;color:#6b7280;font-size:12px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;">
+          Steps tried
+        </p>
+        <p style="margin:0;color:#374151;font-size:15px;line-height:1.7;">
+          ${safeSteps}
+        </p>
+      </div>
+    `,
+  });
+}
+
+function makeSupportTicketTextEmail({ ticket }) {
+  return `New support ticket ${ticket.ticketNumber}
+
+Category: ${ticket.category}
+Subject: ${ticket.subject}
+Name: ${ticket.name || "Not provided"}
+Email: ${ticket.email}
+Username: ${ticket.username ? `@${ticket.username}` : "Not provided"}
+Created: ${ticket.createdAt}
+IP address: ${ticket.ipAddress || "Not captured"}
+Device/browser: ${ticket.userAgent || "Not captured"}
+
+Problem:
+${ticket.details || "No details provided."}
+
+Steps tried:
+${ticket.steps || "Not added."}`;
+}
+
+function makeSupportReceiptHtmlEmail({ ticket, name }) {
+  const safeName = htmlEscape(name || ticket.name || "there");
+  const safeTicketNumber = htmlEscape(ticket.ticketNumber);
+  const safeSubject = htmlEscape(ticket.subject || "Support request");
+
+  return makeEmailShell({
+    title: "Support received your request",
+    preview: `We opened ticket ${ticket.ticketNumber} and will be in touch.`,
+    badge: "Ticket opened",
+    accent: "#2563eb",
+    footerText:
+      "You are receiving this email because you opened a BetterMedia support ticket.",
+    children: `
+      <p style="margin:0 0 14px;font-size:16px;line-height:1.65;color:#111827;">
+        Hello <strong>${safeName}</strong>,
+      </p>
+
+      <p style="margin:0 0 18px;font-size:15px;line-height:1.7;color:#374151;">
+        BetterMedia support has received your request. We opened ticket <strong>${safeTicketNumber}</strong> and will be in touch after reviewing it.
+      </p>
+
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:22px;padding:18px;margin:18px 0;">
+        <p style="margin:0;color:#1e3a8a;font-size:14px;line-height:1.7;">
+          <strong>Subject:</strong> ${safeSubject}
+        </p>
+      </div>
+
+      <p style="margin:0;color:#6b7280;font-size:13px;line-height:1.7;">
+        Please do not send passwords or verification codes. If you need to add screenshots or more context, reply with your ticket number.
+      </p>
+    `,
+  });
+}
+
+function makeSupportReceiptTextEmail({ ticket, name }) {
+  return `Support received your request
+
+Hello ${name || ticket.name || "there"},
+
+BetterMedia support has received your request.
+Ticket: ${ticket.ticketNumber}
+Subject: ${ticket.subject || "Support request"}
+
+We will be in touch after reviewing it.
+
+Please do not send passwords or verification codes. If you need to add screenshots or more context, reply with your ticket number.`;
+}
+
 function makeLoginAlertRows({ device, ipAddress, location, time, locationDetails = {} }) {
   const rows = [
     ["Time", time],
@@ -483,11 +657,109 @@ function dotStuff(message) {
   return message.replace(/\r?\n/g, "\r\n").replace(/^\./gm, "..");
 }
 
-async function sendMail({ to, subject, text, html }) {
+function resendFailureReason(status, body = "") {
+  const cleanBody = String(body || "").trim();
+  if (!cleanBody) return `Resend API failed (${status})`;
+
+  try {
+    const parsed = JSON.parse(cleanBody);
+    const message =
+      parsed?.message ||
+      parsed?.error?.message ||
+      parsed?.error ||
+      parsed?.name;
+
+    if (message) return `Resend API failed (${status}): ${message}`;
+  } catch {
+    // Keep the original text below.
+  }
+
+  return `Resend API failed (${status}): ${cleanBody.slice(0, 240)}`;
+}
+
+async function sendResendMail({ to, subject, text, html }) {
+  const config = resendConfig();
+
+  if (!resendIsConfigured(config)) {
+    const reason = "Resend is not configured";
+
+    recordMailEvent({
+      provider: "resend",
+      to,
+      subject,
+      sent: false,
+      reason,
+    });
+
+    return {
+      sent: false,
+      provider: "resend",
+      reason,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+
+  try {
+    const response = await fetch(config.apiUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: formatAddress(config.fromName, config.fromEmail),
+        to: [to],
+        subject: escapeHeader(subject),
+        text,
+        html,
+      }),
+      signal: controller.signal,
+    });
+
+    const body = await response.text();
+
+    if (!response.ok) {
+      throw new Error(resendFailureReason(response.status, body));
+    }
+
+    recordMailEvent({
+      provider: "resend",
+      to,
+      subject,
+      sent: true,
+    });
+
+    return {
+      sent: true,
+      provider: "resend",
+    };
+  } catch (error) {
+    const reason = error.name === "AbortError"
+      ? "Resend API request timed out."
+      : errorMessage(error);
+
+    recordMailEvent({
+      provider: "resend",
+      to,
+      subject,
+      sent: false,
+      reason,
+    });
+
+    throw new Error(reason);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendSmtpMail({ to, subject, text, html }) {
   const config = smtpConfig();
 
-  if (!getSmtpStatus().configured) {
+  if (!smtpIsConfigured(config)) {
     recordMailEvent({
+      provider: "smtp",
       to,
       subject,
       sent: false,
@@ -496,6 +768,7 @@ async function sendMail({ to, subject, text, html }) {
 
     return {
       sent: false,
+      provider: "smtp",
       reason: "SMTP is not configured",
     };
   }
@@ -603,6 +876,7 @@ async function sendMail({ to, subject, text, html }) {
     await sendCommand(socket, "QUIT", [221], config.timeoutMs);
 
     recordMailEvent({
+      provider: "smtp",
       to,
       subject,
       sent: true,
@@ -610,11 +884,13 @@ async function sendMail({ to, subject, text, html }) {
 
     return {
       sent: true,
+      provider: "smtp",
     };
   } catch (error) {
     const reason = errorMessage(error);
 
     recordMailEvent({
+      provider: "smtp",
       to,
       subject,
       sent: false,
@@ -625,6 +901,48 @@ async function sendMail({ to, subject, text, html }) {
   } finally {
     socket.end();
   }
+}
+
+async function sendMail(message) {
+  const status = getSmtpStatus();
+
+  if (!status.enabled) {
+    recordMailEvent({
+      provider: status.provider || "email",
+      to: message.to,
+      subject: message.subject,
+      sent: false,
+      reason: "Email is disabled",
+    });
+
+    return {
+      sent: false,
+      provider: status.provider || "email",
+      reason: "Email is disabled",
+    };
+  }
+
+  if (status.provider === "resend") {
+    if (status.resendConfigured) return sendResendMail(message);
+    if (status.smtpConfigured) return sendSmtpMail(message);
+  }
+
+  if (status.smtpConfigured) return sendSmtpMail(message);
+  if (status.resendConfigured) return sendResendMail(message);
+
+  recordMailEvent({
+    provider: status.provider || "email",
+    to: message.to,
+    subject: message.subject,
+    sent: false,
+    reason: "Email is not configured",
+  });
+
+  return {
+    sent: false,
+    provider: status.provider || "email",
+    reason: "Email is not configured",
+  };
 }
 
 async function sendCodeMail({ to, name, code, kind }) {
@@ -751,5 +1069,25 @@ export async function sendStaffEmail({ to, name, title, message, staffName }) {
       message,
       staffName,
     }),
+  });
+}
+
+export async function sendSupportTicketEmail({ to, ticket }) {
+  const subject = `${appName} support ${ticket.ticketNumber}: ${ticket.subject || "Support request"}`.slice(0, 120);
+
+  return sendMail({
+    to,
+    subject,
+    text: makeSupportTicketTextEmail({ ticket }),
+    html: makeSupportTicketHtmlEmail({ ticket }),
+  });
+}
+
+export async function sendSupportReceiptEmail({ to, name, ticket }) {
+  return sendMail({
+    to,
+    subject: `${appName} support received ${ticket.ticketNumber}`.slice(0, 120),
+    text: makeSupportReceiptTextEmail({ ticket, name }),
+    html: makeSupportReceiptHtmlEmail({ ticket, name }),
   });
 }

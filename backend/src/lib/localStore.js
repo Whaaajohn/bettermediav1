@@ -13,6 +13,7 @@ import { sanitizeSongAttachment } from "../services/music.service.js";
 import { saveUploadDataUrl } from "../services/storage.service.js";
 import { modelRoutingSummary } from "../bots/services/ollamaRouter.js";
 import { getOllamaHealthCache, listOllamaModels } from "../bots/services/ollamaClient.js";
+import { getGeminiStatus } from "../bots/services/geminiClient.js";
 import { moderateImageContent } from "../bots/services/botVisionModerationService.js";
 import { detectModerationConcern, generateBotReply, generateFollowThanks, getLocalAIStatus } from "./localAi.js";
 
@@ -35,6 +36,7 @@ const initialData = {
   callHistory: [],
   reports: [],
   appeals: [],
+  supportTickets: [],
   notifications: [],
   moderationActions: [],
   moderationLogs: [],
@@ -112,6 +114,15 @@ const initialData = {
     defaultModerationReason: "Community safety",
     defaultStaffTitle: "Message from moderation",
     staffSignature: "MEDIA moderation team",
+    supportEmail: "support@bettermedia.app",
+    supportSubjectPrefix: "BetterMedia support",
+    instagramHandle: "bettermedia",
+    instagramUrl: "https://www.instagram.com/bettermedia/",
+    footerBlurb:
+      "Built for private communities, language practice, messaging, calls, moderation, local testing, and production-ready hosting.",
+    siteDesignMode: "default",
+    siteDesignMotion: "calm",
+    siteDesignDecorations: true,
     reportCategories: [
       "Harassment",
       "Hate or slurs",
@@ -131,6 +142,116 @@ const initialData = {
 let queue = Promise.resolve();
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
+
+const siteDesignModes = new Set([
+  "default",
+  "christmas",
+  "halloween",
+  "black-history",
+  "new-year",
+]);
+
+const siteDesignMotions = new Set(["calm", "lively", "off"]);
+
+const chatBubbleStyles = new Set([
+  "classic",
+  "soft",
+  "polished",
+  "ink",
+  "neon",
+  "warm",
+]);
+
+const supportTicketCategories = [
+  "Login or signup",
+  "Email verification",
+  "Report or moderation",
+  "Messages or calls",
+  "Posts, comments, or media",
+  "Bug or broken page",
+  "Account safety",
+  "Other",
+];
+
+function sanitizeSiteDesignMode(value) {
+  const mode = String(value || "default").trim().toLowerCase();
+  return siteDesignModes.has(mode) ? mode : "default";
+}
+
+function sanitizeSiteDesignMotion(value) {
+  const motion = String(value || "calm").trim().toLowerCase();
+  return siteDesignMotions.has(motion) ? motion : "calm";
+}
+
+function sanitizeChatBubbleStyle(value) {
+  const style = String(value || "classic").trim().toLowerCase();
+  return chatBubbleStyles.has(style) ? style : "classic";
+}
+
+function sanitizeEmail(value, fallback = initialData.adminSettings.supportEmail) {
+  const email = String(value || "").trim().toLowerCase().slice(0, 120);
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return email;
+  return fallback;
+}
+
+function sanitizeOptionalEmail(value) {
+  const email = String(value || "").trim().toLowerCase().slice(0, 120);
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return email;
+  return "";
+}
+
+function sanitizeInstagramHandle(value, fallback = initialData.adminSettings.instagramHandle) {
+  return String(value || fallback || "")
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/^https?:\/\/(www\.)?instagram\.com\//i, "")
+    .replace(/\/+$/g, "")
+    .replace(/[^a-z0-9._]/gi, "")
+    .slice(0, 40);
+}
+
+function sanitizeInstagramUrl(value, handle) {
+  const cleanHandle = sanitizeInstagramHandle(handle);
+  const rawUrl = String(value || "").trim();
+
+  if (!rawUrl && cleanHandle) return `https://www.instagram.com/${cleanHandle}/`;
+
+  try {
+    const url = new URL(rawUrl);
+    const safeHost = /(^|\.)instagram\.com$/i.test(url.hostname);
+    if (url.protocol === "https:" && safeHost) return url.toString();
+  } catch {
+    // Fall back to a safe Instagram profile URL below.
+  }
+
+  return cleanHandle ? `https://www.instagram.com/${cleanHandle}/` : "";
+}
+
+function publicSiteSettingsFromAdmin(settings = {}) {
+  const merged = {
+    ...initialData.adminSettings,
+    ...(settings || {}),
+  };
+  const instagramHandle = sanitizeInstagramHandle(merged.instagramHandle);
+
+  return {
+    appName: "BetterMedia",
+    supportEmail: sanitizeEmail(merged.supportEmail),
+    supportSubjectPrefix:
+      String(merged.supportSubjectPrefix || initialData.adminSettings.supportSubjectPrefix)
+        .trim()
+        .slice(0, 80) || initialData.adminSettings.supportSubjectPrefix,
+    instagramHandle,
+    instagramUrl: sanitizeInstagramUrl(merged.instagramUrl, instagramHandle),
+    footerBlurb:
+      String(merged.footerBlurb || initialData.adminSettings.footerBlurb)
+        .trim()
+        .slice(0, 220) || initialData.adminSettings.footerBlurb,
+    siteDesignMode: sanitizeSiteDesignMode(merged.siteDesignMode),
+    siteDesignMotion: sanitizeSiteDesignMotion(merged.siteDesignMotion),
+    siteDesignDecorations: merged.siteDesignDecorations !== false,
+  };
+}
 
 const safeArray = (value) => {
   if (Array.isArray(value)) return value;
@@ -577,6 +698,7 @@ function normalizeData(data = {}) {
     callHistory: safeArray(data.callHistory),
     reports: safeArray(data.reports),
     appeals: safeArray(data.appeals),
+    supportTickets: safeArray(data.supportTickets),
     notifications: safeArray(data.notifications),
     moderationActions: safeArray(data.moderationActions),
     moderationLogs: safeArray(data.moderationLogs),
@@ -653,6 +775,7 @@ function normalizeData(data = {}) {
       showOnlineStatus: user.showOnlineStatus !== false,
       readReceiptsEnabled: user.readReceiptsEnabled !== false,
       theme: user.theme || "media",
+      chatBubbleStyle: sanitizeChatBubbleStyle(user.chatBubbleStyle),
       security: {
         emailCodeOnLogin: Boolean(user.security?.emailCodeOnLogin || user.emailCodeOnLogin),
         loginAlertsEnabled: user.security?.loginAlertsEnabled ?? user.loginAlertsEnabled ?? true,
@@ -1019,6 +1142,7 @@ async function ensureEnvAdmin() {
         showOnlineStatus: true,
         readReceiptsEnabled: true,
         theme: "media",
+        chatBubbleStyle: "classic",
         blockedUsers: [],
         isOnline: false,
         inCall: false,
@@ -1119,6 +1243,7 @@ async function ensureEnvBot() {
         showOnlineStatus: true,
         readReceiptsEnabled: true,
         theme: "media",
+        chatBubbleStyle: "classic",
         blockedUsers: [],
         isOnline: true,
         inCall: false,
@@ -1277,6 +1402,7 @@ export async function createUser({ email, fullName, password, profilePic }) {
       showOnlineStatus: true,
       readReceiptsEnabled: true,
       theme: "media",
+      chatBubbleStyle: "classic",
       security: {
         emailCodeOnLogin: false,
         loginAlertsEnabled: true,
@@ -1762,6 +1888,51 @@ const textLimit = (value = "", max = 120) => value.toString().trim().slice(0, ma
 const languageValue = (value = "") => textLimit(value, 80).toLowerCase();
 const messagePrivacyOptions = new Set(["everyone", "followers", "following", "mutuals", "nobody"]);
 
+function sanitizeSupportCategory(value) {
+  const raw = textLimit(value || "", 80).toLowerCase();
+  return supportTicketCategories.find((category) => category.toLowerCase() === raw) || "Other";
+}
+
+function makeSupportTicketNumber() {
+  const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const suffix = crypto.randomBytes(3).toString("hex").toUpperCase();
+  return `BM-${stamp}-${suffix}`;
+}
+
+function publicSupportTicket(ticket, { includePrivate = false } = {}) {
+  if (!ticket) return null;
+
+  const safeTicket = {
+    _id: ticket._id,
+    ticketNumber: ticket.ticketNumber,
+    status: ticket.status,
+    category: ticket.category,
+    subject: ticket.subject,
+    name: ticket.name,
+    email: ticket.email,
+    username: ticket.username,
+    details: ticket.details,
+    steps: ticket.steps,
+    supportEmail: ticket.supportEmail,
+    emailDelivery: ticket.emailDelivery || {
+      supportSent: false,
+      receiptSent: false,
+      supportReason: "",
+      receiptReason: "",
+    },
+    createdAt: ticket.createdAt,
+    updatedAt: ticket.updatedAt,
+  };
+
+  if (includePrivate) {
+    safeTicket.userAgent = ticket.userAgent || "";
+    safeTicket.ipAddress = ticket.ipAddress || "";
+    safeTicket.source = ticket.source || "support-page";
+  }
+
+  return safeTicket;
+}
+
 function languageGroupSlug(type, language) {
   const prefix = type === "native_language" ? "native" : "learning";
   return `${prefix}-${languageValue(language).replace(/\s+/g, "-")}`;
@@ -1952,6 +2123,9 @@ export async function updateUser(userId, updates) {
     if (updates.readReceiptsEnabled !== undefined) user.readReceiptsEnabled = Boolean(updates.readReceiptsEnabled);
     if (updates.theme !== undefined) {
       user.theme = textLimit(updates.theme, 40).toLowerCase() || "media";
+    }
+    if (updates.chatBubbleStyle !== undefined) {
+      user.chatBubbleStyle = sanitizeChatBubbleStyle(updates.chatBubbleStyle);
     }
     if (updates.security !== undefined || updates.emailCodeOnLogin !== undefined || updates.loginAlertsEnabled !== undefined) {
       user.security ||= { emailCodeOnLogin: false, loginAlertsEnabled: true, trustedDeviceIds: [] };
@@ -6162,6 +6336,96 @@ export async function sendStaffNotificationFor(staffId, targetUserId, payload = 
   });
 }
 
+export async function createSupportTicketFor(payload = {}, meta = {}) {
+  return withData(async (data) => {
+    const settings = publicSiteSettingsFromAdmin(data.adminSettings);
+    const name = textLimit(payload.name || "", 80);
+    const email = sanitizeOptionalEmail(payload.email);
+    const username = textLimit(String(payload.username || "").replace(/^@+/, ""), 40);
+    const category = sanitizeSupportCategory(payload.category);
+    const subject = textLimit(payload.subject || category, 120) || category;
+    const details = textLimit(payload.details || "", 3000);
+    const steps = textLimit(payload.steps || "", 1200);
+
+    if (!email) {
+      const error = new Error("Add a valid email so support can send your receipt and reply.");
+      error.status = 400;
+      throw error;
+    }
+
+    if (details.length < 10) {
+      const error = new Error("Tell support a little more about what happened.");
+      error.status = 400;
+      throw error;
+    }
+
+    const createdAt = now();
+    const ticket = {
+      _id: crypto.randomUUID(),
+      ticketNumber: makeSupportTicketNumber(),
+      status: "open",
+      category,
+      subject,
+      name,
+      email,
+      username,
+      details,
+      steps,
+      supportEmail: settings.supportEmail,
+      emailDelivery: {
+        supportSent: false,
+        receiptSent: false,
+        supportReason: "",
+        receiptReason: "",
+      },
+      source: "support-page",
+      ipAddress: textLimit(meta.ipAddress || meta.ip || "", 80),
+      userAgent: textLimit(meta.userAgent || "", 500),
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    data.supportTickets.unshift(ticket);
+    data.supportTickets.splice(500);
+
+    data.users
+      .filter((user) => staffRoles.has(user.role))
+      .forEach((staffUser) => {
+        addNotification(data, staffUser._id, {
+          type: "support-ticket",
+          title: `Support ticket ${ticket.ticketNumber}`,
+          message: `${ticket.name || ticket.email} opened: ${ticket.subject}`,
+        });
+      });
+
+    return publicSupportTicket(ticket);
+  });
+}
+
+export async function updateSupportTicketDeliveryFor(ticketId, delivery = {}) {
+  return withData(async (data) => {
+    const ticket = data.supportTickets.find((item) => item._id === normalizeId(ticketId));
+
+    if (!ticket) {
+      const error = new Error("Support ticket not found");
+      error.status = 404;
+      throw error;
+    }
+
+    ticket.emailDelivery = {
+      ...(ticket.emailDelivery || {}),
+      supportSent: Boolean(delivery.supportSent),
+      receiptSent: Boolean(delivery.receiptSent),
+      supportReason: textLimit(delivery.supportReason || "", 220),
+      receiptReason: textLimit(delivery.receiptReason || "", 220),
+      updatedAt: now(),
+    };
+    ticket.updatedAt = now();
+
+    return publicSupportTicket(ticket);
+  });
+}
+
 export async function getReportedAlgorithmPostsFor(staffId) {
   const data = await readData();
   requireStaff(data, staffId);
@@ -6715,11 +6979,14 @@ function buildBotHealth(data) {
     localAIEnabled: settings.localAIEnabled,
     profileReady: Boolean(bot),
     queueBackedBy: env.REDIS_ENABLED ? "redis-or-fallback" : "memory-local",
-    modelProvider: env.OLLAMA_ENABLED
-      ? "ollama-local"
+    modelProvider: env.GEMINI_ENABLED && env.GEMINI_API_KEY
+      ? "gemini"
+      : env.OLLAMA_ENABLED
+        ? "ollama-local"
       : env.BOT_LOCAL_AI_ENABLED
         ? "local-fallback-huggingface-ready"
         : "rules-only",
+    gemini: getGeminiStatus(),
     ollama: {
       enabled: env.OLLAMA_ENABLED,
       baseUrl: env.OLLAMA_BASE_URL,
@@ -7541,6 +7808,30 @@ export async function updateAdminSettingsFor(userId, payload = {}) {
     if (payload.staffSignature !== undefined) {
       nextSettings.staffSignature = payload.staffSignature.toString().trim().slice(0, 300);
     }
+    if (payload.supportEmail !== undefined) {
+      nextSettings.supportEmail = sanitizeEmail(payload.supportEmail, current.supportEmail || initialData.adminSettings.supportEmail);
+    }
+    if (payload.supportSubjectPrefix !== undefined) {
+      nextSettings.supportSubjectPrefix =
+        payload.supportSubjectPrefix.toString().trim().slice(0, 80) || initialData.adminSettings.supportSubjectPrefix;
+    }
+    if (payload.instagramHandle !== undefined || payload.instagramUrl !== undefined) {
+      const handle = sanitizeInstagramHandle(payload.instagramHandle ?? current.instagramHandle);
+      nextSettings.instagramHandle = handle;
+      nextSettings.instagramUrl = sanitizeInstagramUrl(payload.instagramUrl ?? current.instagramUrl, handle);
+    }
+    if (payload.footerBlurb !== undefined) {
+      nextSettings.footerBlurb = payload.footerBlurb.toString().trim().slice(0, 220) || initialData.adminSettings.footerBlurb;
+    }
+    if (payload.siteDesignMode !== undefined) {
+      nextSettings.siteDesignMode = sanitizeSiteDesignMode(payload.siteDesignMode);
+    }
+    if (payload.siteDesignMotion !== undefined) {
+      nextSettings.siteDesignMotion = sanitizeSiteDesignMotion(payload.siteDesignMotion);
+    }
+    if (payload.siteDesignDecorations !== undefined) {
+      nextSettings.siteDesignDecorations = Boolean(payload.siteDesignDecorations);
+    }
     if (payload.autoRefreshSeconds !== undefined) {
       nextSettings.autoRefreshSeconds = Math.max(3, Math.min(60, Number(payload.autoRefreshSeconds) || 5));
     }
@@ -7576,6 +7867,11 @@ export async function updateAdminSettingsFor(userId, payload = {}) {
   });
 }
 
+export async function getPublicSiteSettings() {
+  const data = await readData();
+  return publicSiteSettingsFromAdmin(data.adminSettings);
+}
+
 export async function getAdminPanelFor(userId) {
   const data = await readData();
   requireAdmin(data, userId);
@@ -7591,6 +7887,7 @@ export async function getAdminPanelFor(userId) {
       messages: data.messages.length,
       openReports: data.reports.filter((report) => report.status === "open").length,
       openAppeals: data.appeals.filter((appeal) => appeal.status === "open").length,
+      openSupportTickets: data.supportTickets.filter((ticket) => ticket.status === "open").length,
       activeBans: data.users.filter((user) => isFuture(user.bannedUntil)).length,
       activeFullBans: data.users.filter((user) => user.fullBannedAt).length,
       activeMessageBans: data.users.filter((user) => isFuture(user.messageBanUntil)).length,
@@ -7652,6 +7949,9 @@ export async function getAdminPanelFor(userId) {
         staff: publicUser(data.users.find((user) => user._id === event.staff)),
         targetUser: publicUser(data.users.find((user) => user._id === event.targetUser)),
       })),
+    supportTickets: data.supportTickets
+      .slice(0, 100)
+      .map((ticket) => publicSupportTicket(ticket, { includePrivate: true })),
     botTraining: data.botTraining,
     botSettings: effectiveBotSettings(data),
     botHealth: buildBotHealth(data),

@@ -22,6 +22,7 @@ import callRoutes from "./routes/call.route.js";
 import botRoutes from "./routes/bot.route.js";
 import musicRoutes from "./routes/music.route.js";
 import languageGroupRoutes from "./routes/languageGroups.route.js";
+import siteRoutes from "./routes/site.route.js";
 
 import { getBotRuntimeSnapshot, getMediaDirectory, initLocalStore } from "./lib/localStore.js";
 import { configureSignaling } from "./lib/signaling.js";
@@ -105,6 +106,21 @@ app.use(
 
 function configureApp(targetApp, { adminOnly = false } = {}) {
   targetApp.use(cors(corsOptions));
+  if (env.ENABLE_HELMET) {
+    targetApp.use((req, res, next) => {
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("X-Frame-Options", "DENY");
+      res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+      res.setHeader(
+        "Permissions-Policy",
+        "camera=(self), microphone=(self), display-capture=(self), geolocation=()"
+      );
+      if (env.COOKIE_SECURE) {
+        res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains");
+      }
+      next();
+    });
+  }
   targetApp.use(express.json({ limit: "80mb" }));
   targetApp.use(cookieParser());
   targetApp.use("/media", express.static(getMediaDirectory()));
@@ -129,6 +145,7 @@ function configureApp(targetApp, { adminOnly = false } = {}) {
 
   targetApp.use(healthRoutes);
   targetApp.use("/api", localRateLimit({ max: env.RATE_LIMIT_MAX, windowMs: env.RATE_LIMIT_WINDOW_MS }));
+  targetApp.use("/api/site", siteRoutes);
   targetApp.use("/api/auth", authRoutes);
   targetApp.use("/api/users", userRoutes);
   targetApp.use("/api/chat", chatRoutes);

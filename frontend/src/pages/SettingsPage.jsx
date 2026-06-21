@@ -15,7 +15,6 @@ import {
   RotateCcwIcon,
   SaveIcon,
   ShieldCheckIcon,
-  SparklesIcon,
   UserIcon,
 } from "lucide-react";
 import toast from "react-hot-toast";
@@ -56,9 +55,49 @@ const defaultProfileState = {
   readReceiptsEnabled: true,
   cameraEnabled: true,
   micEnabled: true,
+  chatBubbleStyle: "classic",
 };
 
 const AUTOSAVE_DELAY_MS = 850;
+
+const chatBubbleOptions = [
+  {
+    id: "classic",
+    label: "Classic",
+    description: "Clean BetterMedia bubbles with the normal app feel.",
+  },
+  {
+    id: "soft",
+    label: "Soft",
+    description: "Rounder, calmer bubbles with gentle color.",
+  },
+  {
+    id: "polished",
+    label: "Polished",
+    description: "Glossy gradient bubbles with a premium edge.",
+  },
+  {
+    id: "ink",
+    label: "Ink",
+    description: "Bold dark bubbles for a sharper chat look.",
+  },
+  {
+    id: "neon",
+    label: "Neon",
+    description: "Bright outlines and a more electric style.",
+  },
+  {
+    id: "warm",
+    label: "Warm",
+    description: "Friendly warm tones that feel more personal.",
+  },
+];
+
+function normalizeChatBubbleStyle(value) {
+  return chatBubbleOptions.some((option) => option.id === value)
+    ? value
+    : "classic";
+}
 
 function normalizeProfile(profile) {
   return {
@@ -76,6 +115,7 @@ function normalizeProfile(profile) {
     readReceiptsEnabled: Boolean(profile.readReceiptsEnabled),
     cameraEnabled: Boolean(profile.cameraEnabled),
     micEnabled: Boolean(profile.micEnabled),
+    chatBubbleStyle: normalizeChatBubbleStyle(profile.chatBubbleStyle),
   };
 }
 
@@ -218,6 +258,7 @@ export default function SettingsPage() {
       readReceiptsEnabled: authUser.readReceiptsEnabled !== false,
       cameraEnabled: authUser.cameraEnabled !== false,
       micEnabled: authUser.micEnabled !== false,
+      chatBubbleStyle: normalizeChatBubbleStyle(authUser.chatBubbleStyle),
     };
 
     const userChanged = hydratedUserIdRef.current !== authUser._id;
@@ -700,7 +741,7 @@ export default function SettingsPage() {
                     className="inline-flex h-10 items-center gap-2 rounded-full px-4 text-sm font-semibold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
                     onClick={handleGenerateAvatar}
                   >
-                    <SparklesIcon className="size-4" />
+                    <CameraIcon className="size-4" />
                     Generate
                   </button>
                 </div>
@@ -1075,7 +1116,7 @@ export default function SettingsPage() {
           </SectionCard>
 
           <SectionCard
-            icon={SparklesIcon}
+            icon={LanguagesIcon}
             title="Feed interests"
             description="Tune your For You feed, hashtag suggestions, and people recommendations."
             rightSlot={
@@ -1173,6 +1214,51 @@ export default function SettingsPage() {
               <option value="mutuals">Messages from mutuals</option>
               <option value="nobody">Messages from nobody</option>
             </select>
+
+            <div className="mt-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">Chat bubble style</p>
+                  <p className="mt-1 text-sm leading-5 text-base-content/50">
+                    Pick how your conversation bubbles feel on your account.
+                  </p>
+                </div>
+
+                <span className="rounded-full bg-base-200 px-2.5 py-1 text-xs font-medium text-base-content/50">
+                  {chatBubbleOptions.find((option) => option.id === profileState.chatBubbleStyle)?.label || "Classic"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                {chatBubbleOptions.map((option) => {
+                  const active = profileState.chatBubbleStyle === option.id;
+
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      className={[
+                        "rounded-2xl border p-3 text-left transition",
+                        active
+                          ? "border-primary bg-primary/10 text-base-content shadow-sm"
+                          : "border-base-300 bg-base-200/35 hover:bg-base-200",
+                      ].join(" ")}
+                      onClick={() => updateProfileField("chatBubbleStyle", option.id)}
+                    >
+                      <div className={`bm-chat-bubble-swatch bm-chat-bubbles-${option.id}`}>
+                        <span className="bm-chat-bubble bm-chat-bubble-other">Hey</span>
+                        <span className="bm-chat-bubble bm-chat-bubble-mine">Looks good</span>
+                      </div>
+
+                      <p className="mt-3 text-sm font-semibold">{option.label}</p>
+                      <p className="mt-1 text-xs leading-5 text-base-content/50">
+                        {option.description}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </SectionCard>
 
           <SectionCard

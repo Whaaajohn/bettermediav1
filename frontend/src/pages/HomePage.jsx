@@ -11,7 +11,6 @@ import {
   MessageCircleIcon,
   RefreshCwIcon,
   SearchIcon,
-  SparklesIcon,
   UsersRoundIcon,
 } from "lucide-react";
 import toast from "react-hot-toast";
@@ -50,7 +49,7 @@ const FEED_TABS = [
   {
     id: "for-you",
     label: "For You",
-    icon: SparklesIcon,
+    icon: CompassIcon,
     description: "Recommended for you",
   },
   {

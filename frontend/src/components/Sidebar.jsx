@@ -8,7 +8,7 @@ import {
   SearchIcon,
   SettingsIcon,
   ShieldCheckIcon,
-  ShipWheelIcon,
+  UsersRoundIcon,
 } from "lucide-react";
 
 import CreatePostModal from "./CreatePostModal";
@@ -75,7 +75,7 @@ const Sidebar = () => {
           to="/"
           className="flex h-12 items-center gap-2 rounded-2xl px-2 transition hover:bg-base-200/70"
         >
-          <ShipWheelIcon className="size-8 shrink-0 text-primary" />
+          <UsersRoundIcon className="size-8 shrink-0 text-primary" />
 
           <div className="min-w-0">
             <p className="truncate text-lg font-bold tracking-tight">

@@ -23,7 +23,6 @@ import {
   SendIcon,
   Share2Icon,
   SmilePlusIcon,
-  SparklesIcon,
   SquareStackIcon,
   Trash2Icon,
   VideoIcon,
@@ -666,7 +665,7 @@ function PostMenu({
         {onSeeMoreLikeThis && (
           <li>
             <button type="button" onClick={onSeeMoreLikeThis}>
-              <SparklesIcon className="size-4" />
+              <SearchIcon className="size-4" />
               See more like this
             </button>
           </li>

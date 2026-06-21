@@ -353,9 +353,9 @@ async function deliverVerification(user, code, email) {
     }
 
     console.log(`[LOCAL EMAIL] Verification email sent to ${toEmail}`);
-    return { sent: true, delivery: "smtp" };
+    return { sent: true, delivery: status.provider || "email" };
   } catch (error) {
-    const reason = error.message || "SMTP failed";
+    const reason = error.message || "Email failed";
     console.error("[LOCAL EMAIL] Could not send verification email:", reason);
     console.log(`[LOCAL EMAIL] Verification code for ${toEmail}: ${code}`);
     return { sent: false, delivery: "terminal", reason };
@@ -376,9 +376,9 @@ async function deliverPasswordReset(user, code) {
     }
 
     console.log(`[LOCAL EMAIL] Password reset email sent to ${user.email}`);
-    return { sent: true, delivery: "smtp" };
+    return { sent: true, delivery: status.provider || "email" };
   } catch (error) {
-    const reason = error.message || "SMTP failed";
+    const reason = error.message || "Email failed";
     console.error("[LOCAL EMAIL] Could not send password reset email:", reason);
     console.log(`[LOCAL EMAIL] Password reset code for ${user.email}: ${code}`);
     return { sent: false, delivery: "terminal", reason };
@@ -399,9 +399,9 @@ async function deliverLoginCode(user, code) {
     }
 
     console.log(`[LOCAL EMAIL] Login code email sent to ${user.email}`);
-    return { sent: true, delivery: "smtp" };
+    return { sent: true, delivery: status.provider || "email" };
   } catch (error) {
-    const reason = error.message || "SMTP failed";
+    const reason = error.message || "Email failed";
     console.error("[LOCAL EMAIL] Could not send login code:", reason);
     console.log(`[LOCAL EMAIL] Login code for ${user.email}: ${code}`);
     return { sent: false, delivery: "terminal", reason };
@@ -431,9 +431,9 @@ async function deliverLoginAlert(user, session, req) {
       return { sent: false, delivery: "terminal", reason: status.reason };
     }
 
-    return { sent: true, delivery: "smtp" };
+    return { sent: true, delivery: status.provider || "email" };
   } catch (error) {
-    const reason = error.message || "SMTP failed";
+    const reason = error.message || "Email failed";
     console.error("[LOCAL EMAIL] Could not send login alert:", reason);
     console.log(`[LOCAL EMAIL] Login alert for ${user.email}: ${session?.deviceName || "Unknown device"} from ${origin}`);
     return { sent: false, delivery: "terminal", reason };
@@ -473,9 +473,9 @@ export async function signup(req, res) {
       success: true,
       user: verification.user,
       session,
-      message: mail.delivery === "smtp"
+      message: mail.sent
         ? "Account created. Check your email for the verification code."
-        : "Account created. SMTP is not configured, so the verification code was printed in the local server terminal.",
+        : "Account created. Email is not configured, so the verification code was printed in the local server terminal.",
       mail,
     });
   } catch (error) {
@@ -637,9 +637,9 @@ export async function sendVerificationCode(req, res) {
       alreadyVerified: verification.alreadyVerified,
       message: verification.alreadyVerified
         ? "Your email is already verified."
-        : mail.delivery === "smtp"
+        : mail.sent
           ? `Verification code sent to ${verification.email}.`
-          : "SMTP is not configured, so the verification code was printed in the local server terminal.",
+          : "Email is not configured, so the verification code was printed in the local server terminal.",
       mail,
     });
   } catch (error) {
@@ -672,9 +672,9 @@ export async function forgotPassword(req, res) {
       const mail = await deliverPasswordReset(reset.user, reset.code);
       return res.status(200).json({
         success: true,
-        message: mail.delivery === "smtp"
+        message: mail.sent
           ? "Password reset code sent to your email."
-          : "SMTP is not configured, so the password reset code was printed in the local server terminal.",
+          : "Email is not configured, so the password reset code was printed in the local server terminal.",
         mail,
       });
     }

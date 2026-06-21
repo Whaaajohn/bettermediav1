@@ -11,7 +11,6 @@ import {
   MailCheckIcon,
   RefreshCwIcon,
   ShieldCheckIcon,
-  SparklesIcon,
   UserRoundIcon,
 } from "lucide-react";
 import toast from "react-hot-toast";
@@ -247,7 +246,7 @@ export default function VerifyEmailPage() {
           <div className="w-full max-w-md">
             <div className="mb-8">
               <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-base-300 bg-base-200/60 px-3 py-1 text-xs font-medium text-base-content/60">
-                <SparklesIcon className="size-3.5" />
+                <MailCheckIcon className="size-3.5" />
                 Email verification
               </div>
 

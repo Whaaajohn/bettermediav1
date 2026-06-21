@@ -21,6 +21,8 @@ import BanPage from "./pages/BanPage.jsx";
 import VerifyEmailPage from "./pages/VerifyEmailPage.jsx";
 import DocsPage from "./pages/DocsPage.jsx";
 import BotPage from "./pages/BotPage.jsx";
+import LandingPage from "./pages/LandingPage.jsx";
+import SupportPage from "./pages/SupportPage.jsx";
 
 import { Toaster } from "react-hot-toast";
 
@@ -30,12 +32,47 @@ import CallProvider from "./components/CallProvider.jsx";
 import LiveNotificationToasts from "./components/LiveNotificationToasts.jsx";
 
 import useAuthUser from "./hooks/useAuthUser.js";
+import useSiteSettings from "./hooks/useSiteSettings.js";
 import { useThemeStore } from "./store/useThemeStore.js";
+
+const siteDesignModes = new Set([
+  "default",
+  "christmas",
+  "halloween",
+  "black-history",
+  "new-year",
+]);
+
+const siteDesignMotions = new Set(["calm", "lively", "off"]);
+
+function safeSiteDesignMode(value) {
+  return siteDesignModes.has(value) ? value : "default";
+}
+
+function safeSiteDesignMotion(value) {
+  return siteDesignMotions.has(value) ? value : "calm";
+}
+
+function SeasonalDesignLayer({ mode, enabled }) {
+  if (!enabled || mode === "default") return null;
+
+  return (
+    <div className="bm-seasonal-layer" aria-hidden="true">
+      {Array.from({ length: 9 }, (_, index) => (
+        <span key={index} className="bm-seasonal-particle" />
+      ))}
+    </div>
+  );
+}
 
 const App = () => {
   const { isLoading, authUser } = useAuthUser();
+  const { settings: siteSettings } = useSiteSettings();
   const { theme, hydrateThemeForUser } = useThemeStore();
   const location = useLocation();
+  const siteDesignMode = safeSiteDesignMode(siteSettings.siteDesignMode);
+  const siteDesignMotion = safeSiteDesignMotion(siteSettings.siteDesignMotion);
+  const siteDesignDecorations = siteSettings.siteDesignDecorations !== false;
 
   const isAuthenticated = Boolean(authUser);
   const isOnboarded = authUser?.isOnboarded;
@@ -79,7 +116,21 @@ const App = () => {
   };
 
   return (
-    <div className="min-h-screen bg-base-100" data-theme={theme}>
+    <div
+      className={[
+        "bettermedia-app-shell min-h-screen bg-base-100",
+        `bm-design-${siteDesignMode}`,
+        `bm-design-motion-${siteDesignMotion}`,
+        siteDesignDecorations ? "bm-design-decorated" : "bm-design-clean",
+      ].join(" ")}
+      data-theme={theme}
+      data-site-design={siteDesignMode}
+    >
+      <SeasonalDesignLayer
+        mode={siteDesignMode}
+        enabled={siteDesignDecorations}
+      />
+
       <CallProvider
         authUser={authUser}
         enabled={isAuthenticated && isOnboarded && !isBanned}
@@ -92,6 +143,7 @@ const App = () => {
         <Routes>
           {/* Public pages */}
           <Route path="/docs" element={<DocsPage />} />
+          <Route path="/support" element={<SupportPage />} />
 
           <Route
             path="/signup"
@@ -133,7 +185,10 @@ const App = () => {
           />
 
           {/* Protected pages */}
-          <Route path="/" element={protectedPage(<HomePage />)} />
+          <Route
+            path="/"
+            element={!isAuthenticated ? <LandingPage /> : protectedPage(<HomePage />)}
+          />
 
           <Route
             path="/ban"
