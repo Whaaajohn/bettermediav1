@@ -182,12 +182,13 @@ export default function CallProvider({ authUser, enabled, children }) {
 
     const nextSocket = io(SOCKET_URL, {
       withCredentials: true,
-      transports: ["websocket"],
+      transports: ["websocket", "polling"],
+      rememberUpgrade: true,
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 350,
       reconnectionDelayMax: 1800,
-      timeout: 5000,
+      timeout: 8000,
     });
 
     socketRef.current = nextSocket;

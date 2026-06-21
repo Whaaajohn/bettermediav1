@@ -121,6 +121,25 @@ function emitToUser(userId, eventName, payload) {
   });
 }
 
+export function emitChatMessageEvent(message, eventName = "chat:message") {
+  if (!message) return;
+
+  const senderId = message.sender?._id || message.sender || message.senderId;
+  const recipientId = message.recipient?._id || message.recipient || message.recipientId;
+  const userIds = [...new Set([senderId, recipientId].filter(Boolean).map(String))];
+
+  if (userIds.length === 0) return;
+
+  const payload = {
+    message,
+    senderId,
+    recipientId,
+    conversationUserIds: userIds,
+  };
+
+  userIds.forEach((userId) => emitToUser(userId, eventName, payload));
+}
+
 function emitToCall(callId, eventName, payload) {
   ioServers.forEach((io) => {
     io.to(callRoom(callId)).emit(eventName, payload);

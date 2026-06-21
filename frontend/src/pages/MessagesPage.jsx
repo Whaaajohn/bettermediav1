@@ -1,4 +1,4 @@
-import { createElement, useMemo, useState } from "react";
+import { createElement, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
@@ -15,6 +15,7 @@ import toast from "react-hot-toast";
 
 import UserBadges from "../components/UserBadges";
 import useAuthUser from "../hooks/useAuthUser";
+import useCall from "../hooks/useCall";
 import {
   deleteCallHistory,
   getCallHistory,
@@ -395,6 +396,7 @@ function CallRow({ call, authUser, onDelete, deleting }) {
 export default function MessagesPage() {
   const queryClient = useQueryClient();
   const { authUser } = useAuthUser();
+  const { socket, socketStatus } = useCall();
 
   const [search, setSearch] = useState("");
   const [activeTab, setActiveTab] = useState("all");
@@ -407,7 +409,7 @@ export default function MessagesPage() {
   } = useQuery({
     queryKey: ["conversations"],
     queryFn: getConversations,
-    refetchInterval: 4000,
+    refetchInterval: socketStatus === "connected" ? false : 8000,
     refetchIntervalInBackground: false,
     staleTime: 1500,
     retry: 1,
@@ -437,6 +439,34 @@ export default function MessagesPage() {
     },
     onSettled: () => setDeletingCallId(null),
   });
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const refreshConversations = () => {
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    };
+
+    const refreshCalls = () => {
+      queryClient.invalidateQueries({ queryKey: ["callHistory"] });
+    };
+
+    socket.on("chat:message", refreshConversations);
+    socket.on("chat:message:update", refreshConversations);
+    socket.on("call:incoming", refreshCalls);
+    socket.on("call:accepted", refreshCalls);
+    socket.on("call:declined", refreshCalls);
+    socket.on("call:ended", refreshCalls);
+
+    return () => {
+      socket.off("chat:message", refreshConversations);
+      socket.off("chat:message:update", refreshConversations);
+      socket.off("call:incoming", refreshCalls);
+      socket.off("call:accepted", refreshCalls);
+      socket.off("call:declined", refreshCalls);
+      socket.off("call:ended", refreshCalls);
+    };
+  }, [queryClient, socket]);
 
   const cleanConversations = useMemo(() => {
     return (conversations || []).filter((conversation) => conversation?.user?._id);

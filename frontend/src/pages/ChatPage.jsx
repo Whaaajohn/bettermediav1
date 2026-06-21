@@ -61,8 +61,51 @@ function getMessageSenderId(message) {
   return message?.sender?._id || message?.sender || message?.senderId || "";
 }
 
+function getMessageRecipientId(message) {
+  return message?.recipient?._id || message?.recipient || message?.recipientId || "";
+}
+
 function isMessageMine(message, authUser) {
   return String(getMessageSenderId(message)) === String(authUser?._id);
+}
+
+function messageBelongsToConversation(message, authUser, targetUserId) {
+  const senderId = String(getMessageSenderId(message));
+  const recipientId = String(getMessageRecipientId(message));
+  const currentId = String(authUser?._id || "");
+  const targetId = String(targetUserId || "");
+
+  return (
+    senderId &&
+    recipientId &&
+    currentId &&
+    targetId &&
+    ((senderId === currentId && recipientId === targetId) ||
+      (senderId === targetId && recipientId === currentId))
+  );
+}
+
+function mergeMessageList(messages = [], nextMessage) {
+  if (!nextMessage?._id) return messages;
+
+  let replaced = false;
+  const merged = messages.map((message) => {
+    const sameId = message._id && message._id === nextMessage._id;
+    const sameClientId =
+      message.clientId &&
+      nextMessage.clientId &&
+      message.clientId === nextMessage.clientId;
+
+    if (sameId || sameClientId) {
+      replaced = true;
+      return nextMessage;
+    }
+
+    return message;
+  });
+
+  const next = replaced ? merged : [...merged, nextMessage];
+  return next.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
 }
 
 function makeClientId(prefix = "message") {
@@ -421,7 +464,7 @@ const ChatPage = () => {
   const [editingText, setEditingText] = useState("");
 
   const { authUser } = useAuthUser();
-  const { socket, startCall } = useCall();
+  const { socket, socketStatus, startCall } = useCall();
 
   const { data: targetUser } = useQuery({
     queryKey: ["user", targetUserId],
@@ -437,7 +480,8 @@ const ChatPage = () => {
     queryKey: ["messages", targetUserId],
     queryFn: () => getMessages(targetUserId),
     enabled: !!targetUserId,
-    refetchInterval: 2000,
+    refetchInterval: socketStatus === "connected" ? false : 6000,
+    refetchIntervalInBackground: false,
   });
 
   const { data: rawGifResults = [], isLoading: gifsLoading } = useQuery({
@@ -621,6 +665,32 @@ const ChatPage = () => {
       socket.off("chat:typing", handleTyping);
     };
   }, [socket, targetUserId]);
+
+  useEffect(() => {
+    if (!socket || !targetUserId || !authUser?._id) return;
+
+    const handleMessageEvent = ({ message } = {}) => {
+      if (!messageBelongsToConversation(message, authUser, targetUserId)) return;
+
+      queryClient.setQueryData(["messages", targetUserId], (oldMessages = []) =>
+        mergeMessageList(oldMessages, message)
+      );
+
+      if (String(getMessageSenderId(message)) === String(targetUserId)) {
+        setIsPeerTyping(false);
+      }
+
+      queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    };
+
+    socket.on("chat:message", handleMessageEvent);
+    socket.on("chat:message:update", handleMessageEvent);
+
+    return () => {
+      socket.off("chat:message", handleMessageEvent);
+      socket.off("chat:message:update", handleMessageEvent);
+    };
+  }, [authUser, queryClient, socket, targetUserId]);
 
   useEffect(() => {
     return () => {

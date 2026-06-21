@@ -9,6 +9,7 @@ import {
   toggleMessageReactionFor,
 } from "../lib/localStore.js";
 import { notifyBotMessageCreated } from "../bots/index.js";
+import { emitChatMessageEvent } from "../lib/signaling.js";
 
 function sendError(res, error, fallback = "Internal Server Error") {
   res.status(error.status || 500).json({
@@ -52,6 +53,7 @@ export async function sendMessage(req, res) {
     });
 
     notifyBotMessageCreated(message, req.user);
+    emitChatMessageEvent(message, "chat:message");
     res.status(201).json(message);
   } catch (error) {
     console.log("Error in sendMessage controller:", error.message);
@@ -62,6 +64,7 @@ export async function sendMessage(req, res) {
 export async function editMessage(req, res) {
   try {
     const message = await editMessageFor(req.user.id, req.params.messageId, req.body.text || "");
+    emitChatMessageEvent(message, "chat:message:update");
     res.status(200).json(message);
   } catch (error) {
     console.log("Error in editMessage controller:", error.message);
@@ -72,6 +75,7 @@ export async function editMessage(req, res) {
 export async function deleteMessage(req, res) {
   try {
     const message = await deleteMessageFor(req.user.id, req.params.messageId);
+    emitChatMessageEvent(message, "chat:message:update");
     res.status(200).json(message);
   } catch (error) {
     console.log("Error in deleteMessage controller:", error.message);
@@ -86,6 +90,7 @@ export async function toggleMessageReaction(req, res) {
       req.params.messageId,
       req.body.emoji || ""
     );
+    emitChatMessageEvent(message, "chat:message:update");
     res.status(200).json(message);
   } catch (error) {
     console.log("Error in toggleMessageReaction controller:", error.message);
